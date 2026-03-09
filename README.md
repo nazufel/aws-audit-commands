@@ -106,7 +106,13 @@ Ensure the use of AWS-managed Roles and Groups aren't used. Enforce least-privil
 
 This section holds the plan for auditing EKS cluster and the commands to do so. The objective here is to be able to go through the main parts of a [Kubernetes](https://kubernetes.io/docs/home/) cluster and identify the main components that need to be secured.
 
-## List Out Kubernetes Cluster and Versions
+> Use api-resources to get a list of things to query the Kube API for in case the names can't be figured out
+
+```bash
+kubectl api-resources -o wide
+```
+
+## List Out Kubernetes Clusters and Versions
 
 Check to see if the clusters are running supported versions of Kubernetes or End of Life.
 
@@ -114,7 +120,7 @@ Check to see if the clusters are running supported versions of Kubernetes or End
 
 Add the cluster to your [kubeconfig](https://kubernetes.io/docs/concepts/configuration/organize-cluster-access-kubeconfig/) at this stage so that connection and auditing of it later can be achieved. 
 
-> Use tools like [kubectx](https://github.com/ahmetb/kubectx) or [K9s](https://k9scli.io/) to manage your context.
+> Use tools like [kubectx](https://github.com/ahmetb/kubectx) or [K9s](https://k9scli.io/) to manage your contexts.
 
 ## Check for Private Clusters 
 
@@ -214,7 +220,6 @@ Kubernetes uses [Services](https://kubernetes.io/docs/concepts/services-networki
 
 > Kubernetes Secrets are, by default, stored unencrypted in the API server's underlying data store (etcd). Anyone with API access can retrieve or modify a Secret, and so can anyone with access to etcd. Additionally, anyone who is authorized to create a Pod in a namespace can use that access to read any Secret in that namespace; this includes indirect access such as the ability to create a Deployment.
 
-
 > In order to safely use Secrets, take at least the following steps:
 
 > * Enable Encryption at Rest for Secrets.
@@ -222,8 +227,6 @@ Kubernetes uses [Services](https://kubernetes.io/docs/concepts/services-networki
 > * Restrict Secret access to specific containers.
 >* Consider using external Secret store providers.
 
-## CRDs
-
 ## Roles, RoleBindings, ClusterRoles, and ClusterRoleBindings
 
-
+## CRDs
