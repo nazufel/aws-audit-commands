@@ -44,6 +44,11 @@ Check the security groups for an instance to see what traffic is allowed to reac
 
 ## Check to See if Cloud Trail Logging Is Configured
 
+## Check the Use of NAT
+
+## Check the Use of a WAF
+
+
 ## Check for Tags
 
 Check to see if the instance has necessary tagging:
@@ -107,6 +112,10 @@ Check to see if the clusters are running supported versions of Kubernetes or End
 
 ## Add a Cluster to kubeconfing
 
+Add the cluster to your [kubeconfig](https://kubernetes.io/docs/concepts/configuration/organize-cluster-access-kubeconfig/) at this stage so that connection and auditing of it later can be achieved. 
+
+> Use tools like [kubectx](https://github.com/ahmetb/kubectx) or [K9s](https://k9scli.io/) to manage your context.
+
 ## Check for Private Clusters 
 
 The Kubernetes control plane should not be publicly exposed. Building private clusters is reccomended,. The following command(s) check to see if the cluster is prublic or private.
@@ -157,7 +166,7 @@ Pods can have a [Security Context](https://kubernetes.io/docs/tasks/configure-po
 
 ### 1. Pod Spec `.spec.securityContext`
 
-The spec looks like so:
+The Pod spec contains settings applied to the entire Pod. The spec looks like so:
 
 ```yaml
 spec:
@@ -172,7 +181,7 @@ Ensure the Pod is not running as root.
 
 ### 2. Container definitions `.spec.contianers[*].securityContext`. 
 
-The spec looks like so:
+The containers spec defines settings applied to the individual container inside of the Pod. Pods can have one or more containers. The spec looks like so:
 
 ```yaml
   containers:
@@ -181,11 +190,17 @@ The spec looks like so:
       allowPrivilegeEscalation: false
 ```
 
-* Privileged contaienrs is set to `false`
-* Privilege escalation is set to `false`
-* 
+## Services, Gateway, and Network Policies
 
-## Services, Network Policies, and Ingress
+These components affect the routing and control of traffic within and outside of the cluster.
+
+### Services
+
+Kubernetes uses [Services](https://kubernetes.io/docs/concepts/services-networking/service/) to expose groups of Pods for networking. There are multiple [types](https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types) of services. Check the services to ensure they are routing to the proper Pods. A reccomendation would to use the ClusterIP type unless explicitly necessary. ClusterIPs route traffic internally without exposing it to the network outside of the cluster. A different resource is used routing traffic in and out of a cluster.
+
+## Gateway
+
+[Gateway](https://kubernetes.io/docs/concepts/services-networking/gateway/) is the newest version of Ingress. This is how traffic is routed into and out of the cluster. Gateways use providers much like Ingress. Ensure those components are up to date and supported. Remove any uncessary Gateway routes.
 
 ## ConfigMaps and Secrets
 
