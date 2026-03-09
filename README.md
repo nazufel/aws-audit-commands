@@ -202,7 +202,25 @@ Kubernetes uses [Services](https://kubernetes.io/docs/concepts/services-networki
 
 [Gateway](https://kubernetes.io/docs/concepts/services-networking/gateway/) is the newest version of Ingress. This is how traffic is routed into and out of the cluster. Gateways use providers much like Ingress. Ensure those components are up to date and supported. Remove any uncessary Gateway routes.
 
-## ConfigMaps and Secrets
+## ConfigMaps, Secrets, and Volumes
+
+### ConfigMaps
+
+[ConfigMap]s are used to inject configurations into a Pod. They can be mounted as enviorment variables or as a file on the container's filesystem. Read through the ConfigMaps to ensure no secrets or other sensative information is kept in them. 
+
+### Secrets
+
+[Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) are a way to inject sensative information into a Pod. Reccomendations for securing these are taken right from the Kubernetes documentation:
+
+> Kubernetes Secrets are, by default, stored unencrypted in the API server's underlying data store (etcd). Anyone with API access can retrieve or modify a Secret, and so can anyone with access to etcd. Additionally, anyone who is authorized to create a Pod in a namespace can use that access to read any Secret in that namespace; this includes indirect access such as the ability to create a Deployment.
+
+
+> In order to safely use Secrets, take at least the following steps:
+
+> * Enable Encryption at Rest for Secrets.
+> * Enable or configure RBAC rules with least-privilege access to Secrets.
+> * Restrict Secret access to specific containers.
+>* Consider using external Secret store providers.
 
 ## CRDs
 
