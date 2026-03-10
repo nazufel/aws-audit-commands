@@ -4,12 +4,233 @@ Runbook of auditing an AWS environment and the commands to run.
 
 # Organization
 
-An [Organization](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_introduction.html) is the largest object in AWS. It contain one or more AWS Accounts. Normally, [Service Control Policies](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html) would be applied at this level and trickle down into the containing accounts. Examples of SCPs could be:
+An [Organization](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_introduction.html) is the largest object in AWS. It contain one or more AWS Accounts. Normally, [Service Control Policies](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html) would be applied at this level and trickle down into the containing accounts.
 
-* Restrict IMDSv1 Usage
-* Restrict the Usage of the Root Account
-* Restrict Usage of `AdministratorAccess` IAM Role
-* Force MFA usage
+Here are the key checks to walk through.
+
+## Step 0: Verify SCPs Are Enabled and Attached
+
+Confirm that SCPs are actually turned on for the organization. It's a feature that has to be explicitly enabled and it's easy to assume it's on when it isn't. Then verify that policies are attached to the org root or to OUs instead of just existing, but not attached to anything doing nothing.
+
+**What to check:**
+- The `SERVICE_CONTROL_POLICY` policy type shows as `ENABLED` on the org root
+- There is at least one SCP attached to the root or to each OU
+- No SCPs are sitting in the list unattached
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — foundational enforcement mechanism for controls **1.4** (no root access keys), **1.5** (root MFA), and **3.1** (CloudTrail in all regions) across all member accounts.
+
+Confirm `SERVICE_CONTROL_POLICY` is enabled on the org root:
+
+```bash
+aws organizations list-roots \
+  --query 'Roots[*].{Id:Id,PolicyTypes:PolicyTypes}'
+```
+
+List all SCPs in the organization:
+
+```bash
+aws organizations list-policies \
+  --filter SERVICE_CONTROL_POLICY \
+  --query 'Policies[*].{Id:Id,Name:Name,Description:Description}'
+```
+
+Check which SCPs are attached to the root (substitute `<root-id>` from the output above):
+
+```bash
+aws organizations list-policies-for-target \
+  --target-id <root-id> \
+  --filter SERVICE_CONTROL_POLICY \
+  --query 'Policies[*].{Id:Id,Name:Name}'
+```
+
+## Check for a Root Account Restriction SCP
+
+The AWS root account is the single most powerful identity in existence — it bypasses every IAM policy. An SCP that prevents root account actions across member accounts is one of the most important guardrails you can put in place. At the org level, you can't stop the management account's root user, but you can lock down every member account.
+
+**What to check:**
+- An SCP exists that denies all or specific high-risk actions when the principal is `root`
+- The SCP is attached to the org root or all OUs, not just the management account
+- The policy document uses `"Principal": {"AWS": "arn:aws:iam::*:root"}` or the `aws:PrincipalArn` condition key
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **1.4** (Ensure no root user account access key exists) and **1.5** (Ensure MFA is enabled for the root user account).
+
+Inspect the full content of a specific SCP (substitute `<policy-id>` from the list above):
+
+```bash
+aws organizations describe-policy \
+  --policy-id <policy-id> \
+  --query 'Policy.Content' \
+  --output text | jq .
+```
+
+To dump the contents of every SCP at once, write the following to a file and run it:
+
+```bash
+#!/usr/bin/env bash
+for policy_id in $(aws organizations list-policies \
+  --filter SERVICE_CONTROL_POLICY \
+  --query 'Policies[*].Id' \
+  --output text); do
+  echo "=== Policy: $policy_id ==="
+  aws organizations describe-policy \
+    --policy-id "$policy_id" \
+    --query 'Policy.Content' \
+    --output text | jq .
+done
+```
+
+## Check for an IMDSv1 Restriction SCP
+
+The IMDS SSRF vulnerability was already called out in the intro — the SCP is the most reliable way to enforce IMDSv2 at scale. Individual IAM policies can be overridden or misconfigured, but an SCP at the org root is a hard ceiling. Without it, a single misconfigured launch template can expose credentials to anyone who can reach the instance.
+
+**What to check:**
+- An SCP exists that denies `ec2:RunInstances` when the condition `ec2:MetadataHttpTokens` is not set to `required`
+- The SCP covers all accounts by being attached to the root or all OUs
+- There are no unintended exemptions for specific accounts or roles carved out of the SCP
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **5.6** (Ensure that EC2 Metadata Service only allows IMDSv2).
+
+Write the following to a file and run it to scan all SCPs for any reference to IMDS or `MetadataHttpTokens`:
+
+```bash
+#!/usr/bin/env bash
+for policy_id in $(aws organizations list-policies \
+  --filter SERVICE_CONTROL_POLICY \
+  --query 'Policies[*].Id' \
+  --output text); do
+  content=$(aws organizations describe-policy \
+    --policy-id "$policy_id" \
+    --query 'Policy.Content' \
+    --output text)
+  if echo "$content" | grep -qi "MetadataHttpTokens\|imds"; then
+    echo "Found IMDS policy: $policy_id"
+    echo "$content" | jq .
+  fi
+done
+```
+
+## Check for a Region Restriction SCP
+
+AWS enables all regions by default. A region restriction SCP limits deployments to approved regions only — this shrinks the monitoring surface and makes it much harder for a malicious actor to spin up resources in an unmonitored region and go unnoticed for months.
+
+**What to check:**
+- An SCP exists that denies all actions unless `aws:RequestedRegion` matches an approved list
+- Global services (IAM, CloudFront, Route 53, STS, Support) are exempted since they don't use regional endpoints
+- The approved region list matches what the organization actually uses
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — supports **3.1** (Ensure CloudTrail is enabled in all regions) by reducing the number of regions that need active monitoring and incident response coverage.
+
+Check which regions are currently accessible from the account:
+
+```bash
+aws account list-regions \
+  --region-opt-status-contains ENABLED ENABLED_BY_DEFAULT \
+  --query 'Regions[*].{Region:RegionName,Status:RegionOptStatus}'
+```
+
+Write the following to a file and run it to scan all SCPs for a region restriction condition:
+
+```bash
+#!/usr/bin/env bash
+for policy_id in $(aws organizations list-policies \
+  --filter SERVICE_CONTROL_POLICY \
+  --query 'Policies[*].Id' \
+  --output text); do
+  content=$(aws organizations describe-policy \
+    --policy-id "$policy_id" \
+    --query 'Policy.Content' \
+    --output text)
+  if echo "$content" | grep -q "RequestedRegion"; then
+    echo "Found region restriction in policy: $policy_id"
+    echo "$content" | jq .
+  fi
+done
+```
+
+## Check for an Org-Wide CloudTrail Feeding a Central S3 Bucket
+
+An audit trail is the foundation of incident response and compliance. CloudTrail records every API call made in every account. The org-wide trail consolidates those logs into a single, centralized S3 bucket under the security or logging account — separate from the accounts being audited so that a compromised account cannot tamper with or delete its own logs. This is a hard requirement for SOC2 and ISO 27001.
+
+**What to check:**
+- An organizational CloudTrail exists and is enabled in all regions
+- Logs are delivered to an S3 bucket in a dedicated logging or security account, not the account being audited
+- The destination S3 bucket has `Block Public Access` enabled and a bucket policy that denies `s3:DeleteObject` and `s3:PutBucketPolicy` to everyone except the logging service
+- Log file validation is enabled so that tampered or deleted log files can be detected
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **3.1** (Ensure CloudTrail is enabled in all regions), **3.2** (Ensure CloudTrail log file validation is enabled), and **3.3** (Ensure the S3 bucket used to store CloudTrail logs is not publicly accessible).
+
+List all trails and confirm one is an organizational trail. Note the `Name` and `S3BucketName` values for the next steps:
+
+```bash
+aws cloudtrail describe-trails \
+  --include-shadow-trails \
+  --query 'trailList[*].{Name:Name,IsOrganizationTrail:IsOrganizationTrail,HomeRegion:HomeRegion,S3BucketName:S3BucketName,LogFileValidationEnabled:LogFileValidationEnabled}'
+```
+
+Check the trail status to confirm logging is actually active (substitute `<trail-name>` from above):
+
+```bash
+aws cloudtrail get-trail-status \
+  --name <trail-name> \
+  --query '{IsLogging:IsLogging,LatestDeliveryTime:LatestDeliveryTime,LatestDeliveryError:LatestDeliveryError}'
+```
+
+Confirm the destination bucket blocks public access (substitute `<trail-bucket-name>` from the first command):
+
+```bash
+aws s3api get-public-access-block \
+  --bucket <trail-bucket-name>
+```
+
+Check the bucket policy for any permissions that would allow deleting objects or modifying the policy:
+
+```bash
+aws s3api get-bucket-policy \
+  --bucket <trail-bucket-name> \
+  --output text | jq .
+```
+
+## Confirm GuardDuty Is Enabled Organization-Wide
+
+GuardDuty is AWS's managed threat detection service — it watches CloudTrail, DNS logs, VPC Flow Logs, and more for signs of compromise. When enrolled at the org level through a delegated administrator, it automatically covers new member accounts as they're added. Without org-level enrollment, new accounts come in unmonitored.
+
+**What to check:**
+- GuardDuty has a delegated administrator account configured for the organization
+- `AutoEnableOrganizationMembers` is set to `ALL` or `NEW` so new accounts are covered automatically
+- All member accounts show a `Enabled` relationship status — look for any that are `Disabled` or `Resigned`
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **3.9** (Ensure that AWS GuardDuty is enabled).
+
+Confirm a delegated administrator is set for GuardDuty:
+
+```bash
+aws organizations list-delegated-administrators \
+  --service-principal guardduty.amazonaws.com \
+  --query 'DelegatedAdministrators[*].{AccountId:Id,Status:Status}'
+```
+
+The remaining commands should be run from the delegated admin account. First, get the detector ID:
+
+```bash
+aws guardduty list-detectors \
+  --query 'DetectorIds'
+```
+
+Check the org-wide configuration to confirm auto-enrollment is on (substitute `<detector-id>` from above):
+
+```bash
+aws guardduty describe-organization-configuration \
+  --detector-id <detector-id> \
+  --query '{AutoEnable:AutoEnable,AutoEnableOrganizationMembers:AutoEnableOrganizationMembers}'
+```
+
+List any member accounts that are not in an `Enabled` state:
+
+```bash
+aws guardduty list-members \
+  --detector-id <detector-id> \
+  --query 'Members[?RelationshipStatus!=`Enabled`].{AccountId:AccountId,Status:RelationshipStatus}'
+```
 
 # Account
 
@@ -238,6 +459,8 @@ If neither are in use, then reccomend EKS Pod Identities.
 # RDS
 
 [Relational Database Service](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html) (RDS) runs managed relational databases. 
+
+RDS should use IAM for permissions instead of relying on the underlying db. for example, the postgres user should have a role grant of `rds_iam` to tell it to accept an iam token instead of a username and password.
 
 ## Public Exposure
 
