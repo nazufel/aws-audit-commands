@@ -229,4 +229,18 @@ Kubernetes uses [Services](https://kubernetes.io/docs/concepts/services-networki
 
 ## Roles, RoleBindings, ClusterRoles, and ClusterRoleBindings
 
+### Check If IRSA or EKS Pod Identites Is Being Used
+
+If neither are in use, then reccomend EKS Pod Identities.
+
 ## CRDs
+
+# RDS
+
+[Relational Database Service](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html) (RDS) runs managed relational databases. 
+
+## Public Exposure
+
+# Bedrock
+
+[Bedrock](https://aws.amazon.com/bedrock/) is for building and hosting AI models.
