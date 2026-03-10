@@ -372,7 +372,147 @@ aws iam get-credential-report \
 Cross-reference the `rotated` dates against today. Any key older than 90 days is a finding. Any key where `last_used` is `N/A` has never been used and should be deleted.
 
 # VPC
+
 This section holds the plan for auditing VPC and the commands to do so. The VPC is the heart of it all. Here are the things to look for at the VPC level.
+
+## Enable VPC Flow Logs
+
+Flow Logs capture metadata about every network connection accepted or rejected within a VPC: source IP, destination IP, port, protocol, and whether the traffic was allowed or denied. Without them, there is no record of network-level activity. Detecting lateral movement, data exfiltration, or unexpected traffic between resources is not possible if flow logs are off.
+
+**What to check:**
+* Flow Logs are enabled on every VPC
+* Logs are being delivered to CloudWatch Logs or S3 without errors
+* The log format captures enough fields to be useful
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **3.9** (Ensure VPC flow logging is enabled in all VPCs).
+
+List all VPCs in the account and note their IDs:
+
+```bash
+aws ec2 describe-vpcs \
+  --query 'Vpcs[*].{VpcId:VpcId,Name:Tags[?Key==`Name`]|[0].Value,IsDefault:IsDefault,CidrBlock:CidrBlock}'
+```
+
+Check which VPCs have flow logs configured (substitute `<vpc-id>` from above):
+
+```bash
+aws ec2 describe-flow-logs \
+  --filter Name=resource-id,Values=<vpc-id> \
+  --query 'FlowLogs[*].{VpcId:ResourceId,Status:FlowLogStatus,Destination:LogDestinationType,DeliverLogsStatus:DeliverLogsStatus}'
+```
+
+Write the following to a file and run it to check flow log status across all VPCs at once:
+
+```bash
+#!/usr/bin/env bash
+for vpc_id in $(aws ec2 describe-vpcs \
+  --query 'Vpcs[*].VpcId' \
+  --output text); do
+  result=$(aws ec2 describe-flow-logs \
+    --filter Name=resource-id,Values="$vpc_id" \
+    --query 'FlowLogs[*].FlowLogStatus' \
+    --output text)
+  if [ -z "$result" ]; then
+    echo "NO FLOW LOGS: $vpc_id"
+  else
+    echo "OK: $vpc_id - $result"
+  fi
+done
+```
+
+Any VPC printed with `NO FLOW LOGS` is a finding.
+
+## Check Security Groups for Unrestricted Inbound Access
+
+Security groups with inbound rules open to `0.0.0.0/0` on sensitive ports expose those resources directly to the internet. SSH (port 22) and RDP (port 3389) are the most critical. An open SSH port is actively scanned and attacked within minutes of being exposed. Any finding here should be treated as high severity.
+
+**What to check:**
+* No security group allows inbound `0.0.0.0/0` on port 22 (SSH)
+* No security group allows inbound `0.0.0.0/0` on port 3389 (RDP)
+* No security group allows inbound `0.0.0.0/0` on all ports (`-1` protocol)
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **5.2** (Ensure no security groups allow ingress from 0.0.0.0/0 to remote server administration ports).
+
+Check for security groups with unrestricted SSH access:
+
+```bash
+aws ec2 describe-security-groups \
+  --filters Name=ip-permission.from-port,Values=22 \
+            Name=ip-permission.cidr,Values=0.0.0.0/0 \
+  --query 'SecurityGroups[*].{GroupId:GroupId,GroupName:GroupName,VpcId:VpcId}'
+```
+
+Check for security groups with unrestricted RDP access:
+
+```bash
+aws ec2 describe-security-groups \
+  --filters Name=ip-permission.from-port,Values=3389 \
+            Name=ip-permission.cidr,Values=0.0.0.0/0 \
+  --query 'SecurityGroups[*].{GroupId:GroupId,GroupName:GroupName,VpcId:VpcId}'
+```
+
+Check for security groups that allow all inbound traffic from anywhere:
+
+```bash
+aws ec2 describe-security-groups \
+  --filters Name=ip-permission.protocol,Values=-1 \
+            Name=ip-permission.cidr,Values=0.0.0.0/0 \
+  --query 'SecurityGroups[*].{GroupId:GroupId,GroupName:GroupName,VpcId:VpcId}'
+```
+
+## Check the Default VPC and Default Security Group
+
+Every AWS account comes with a default VPC in every region. Its default security group allows unrestricted inbound traffic from other members of the same security group. Resources should not be deployed into the default VPC. It exists as a convenience for getting started and has none of the network architecture a production workload needs. The default security group should also restrict all traffic so that anything accidentally launched into it does not inherit open access.
+
+**What to check:**
+* No resources (EC2 instances, RDS, Lambda, etc.) are deployed in the default VPC
+* The default security group in every VPC has no inbound or outbound rules beyond what is required
+* Ideally the default VPC has been deleted in regions the organization does not use
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **5.3** (Ensure the default security group of every VPC restricts all traffic).
+
+List all default VPCs across the account:
+
+```bash
+aws ec2 describe-vpcs \
+  --filters Name=isDefault,Values=true \
+  --query 'Vpcs[*].{VpcId:VpcId,Region:OwnerId,CidrBlock:CidrBlock}'
+```
+
+Check the rules on the default security group (substitute `<vpc-id>`):
+
+```bash
+aws ec2 describe-security-groups \
+  --filters Name=vpc-id,Values=<vpc-id> \
+            Name=group-name,Values=default \
+  --query 'SecurityGroups[*].{GroupId:GroupId,InboundRules:IpPermissions,OutboundRules:IpPermissionsEgress}'
+```
+
+## Check VPC Peering Route Tables
+
+VPC peering connections link two VPCs so that traffic can flow between them. The risk is in the route tables — a broad route that allows any subnet in one VPC to reach any subnet in the other defeats the purpose of network segmentation. Each peering connection should route only the specific subnets that need to communicate, not entire VPC CIDR blocks.
+
+**What to check:**
+* VPC peering connections are intentional and documented
+* Route tables for peering connections reference specific subnets, not full VPC CIDR blocks
+* No peering connection routes traffic between a production VPC and a development or shared-services VPC without explicit justification
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **5.4** (Ensure routing tables for VPC peering are "least access").
+
+List all active VPC peering connections:
+
+```bash
+aws ec2 describe-vpc-peering-connections \
+  --filters Name=status-code,Values=active \
+  --query 'VpcPeeringConnections[*].{Id:VpcPeeringConnectionId,Requester:RequesterVpcInfo.VpcId,Accepter:AccepterVpcInfo.VpcId}'
+```
+
+List all route tables and their routes to review which subnets are routed through each peering connection:
+
+```bash
+aws ec2 describe-route-tables \
+  --query 'RouteTables[*].{RouteTableId:RouteTableId,VpcId:VpcId,Routes:Routes[?VpcPeeringConnectionId!=null]}'
+```
 
 # EC2
 
