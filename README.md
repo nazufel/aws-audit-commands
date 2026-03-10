@@ -45,7 +45,7 @@ aws organizations list-policies-for-target \
 
 ## Check for a Root Account Restriction SCP
 
-The AWS root account is the single most powerful identity in existence — it bypasses every IAM policy. An SCP that prevents root account actions across member accounts is one of the most important guardrails you can put in place. At the org level, you can't stop the management account's root user, but you can lock down every member account.
+The AWS root account is the single most powerful identity in existence. It bypasses every IAM policy. An SCP that prevents root account actions across member accounts is one of the most important guardrails you can put in place. At the org level, you can't stop the management account's root user, but you can lock down every member account's root user so it can't be used. The management account's root user should have the password in a vault, hardware MFA locked away, and only used in a break-glass scenario. 
 
 **What to check:**
 - An SCP exists that denies all or specific high-risk actions when the principal is `root`
@@ -81,7 +81,7 @@ done
 
 ## Check for an IMDSv1 Restriction SCP
 
-The IMDS SSRF vulnerability was already called out in the intro — the SCP is the most reliable way to enforce IMDSv2 at scale. Individual IAM policies can be overridden or misconfigured, but an SCP at the org root is a hard ceiling. Without it, a single misconfigured launch template can expose credentials to anyone who can reach the instance.
+The IMDS SSRF vulnerability was already called out in the intro. The SCP is the most reliable way to enforce IMDSv2 at scale. Individual IAM policies can be overridden or misconfigured, but an SCP at the org root is a hard ceiling. Without it, a single misconfigured launch template can expose credentials to anyone who can reach the instance.
 
 **What to check:**
 - An SCP exists that denies `ec2:RunInstances` when the condition `ec2:MetadataHttpTokens` is not set to `required`
@@ -111,7 +111,7 @@ done
 
 ## Check for a Region Restriction SCP
 
-AWS enables all regions by default. A region restriction SCP limits deployments to approved regions only — this shrinks the monitoring surface and makes it much harder for a malicious actor to spin up resources in an unmonitored region and go unnoticed for months.
+AWS enables all regions by default. A region restriction SCP limits deployments to approved regions only. This shrinks the monitoring surface and makes it much harder for a malicious actor to spin up resources in an unmonitored region and go unnoticed for months.
 
 **What to check:**
 - An SCP exists that denies all actions unless `aws:RequestedRegion` matches an approved list
@@ -149,7 +149,9 @@ done
 
 ## Check for an Org-Wide CloudTrail Feeding a Central S3 Bucket
 
-An audit trail is the foundation of incident response and compliance. CloudTrail records every API call made in every account. The org-wide trail consolidates those logs into a single, centralized S3 bucket under the security or logging account — separate from the accounts being audited so that a compromised account cannot tamper with or delete its own logs. This is a hard requirement for SOC2 and ISO 27001.
+An audit trail is the foundation of incident response and compliance. CloudTrail records every API call made in every account. The org-wide trail consolidates those logs into a single, centralized S3 bucket under the security or logging account that is separate from the accounts being audited so that a compromised account cannot tamper with or delete its own logs. 
+
+> This is a hard requirement for SOC2 and ISO 27001.
 
 **What to check:**
 - An organizational CloudTrail exists and is enabled in all regions
@@ -192,7 +194,7 @@ aws s3api get-bucket-policy \
 
 ## Confirm GuardDuty Is Enabled Organization-Wide
 
-GuardDuty is AWS's managed threat detection service — it watches CloudTrail, DNS logs, VPC Flow Logs, and more for signs of compromise. When enrolled at the org level through a delegated administrator, it automatically covers new member accounts as they're added. Without org-level enrollment, new accounts come in unmonitored.
+GuardDuty is AWS's managed threat detection service. It watches CloudTrail, DNS logs, VPC Flow Logs, and more for signs of compromise. When enrolled at the org level through a delegated administrator, it automatically covers new member accounts as they're added. Without org-level enrollment, new accounts come in unmonitored.
 
 **What to check:**
 - GuardDuty has a delegated administrator account configured for the organization
@@ -234,15 +236,140 @@ aws guardduty list-members \
 
 # Account
 
-The AWS [Account] is contained within an Organization. It acts as a resource and security boundary for AWS services. Below are the components that should be audited.
+The AWS [Account](https://docs.aws.amazon.com/accounts/latest/reference/accounts-welcome.html) is contained within an Organization. An organization can have many accounts. It acts as a resource and security boundary for AWS services. Below are the components that should be audited.
 
-## Ensure Cloudtrail Logging Is Set Up 
+## Check the Root Account
+
+The root account in each AWS account has unconditional access to everything. No IAM policy can restrict it. Two things must be true: 
+
+* No access keys should exist for it
+* MFA must be enabled
+
+Also, check when it was last used. Root should almost never appear in normal operations. Any recent activity is worth investigating.
+
+**What to check:**
+* No access keys exist for the root account
+* MFA is enabled for the root account
+* The root account has not been used recently for day-to-day activity
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **1.4** (Ensure no root user account access key exists) and **1.5** (Ensure MFA is enabled for the root user account).
+
+Pull a summary of the account's IAM posture. `AccountAccessKeysPresent` should be `0` and `AccountMFAEnabled` should be `1`:
+
+```bash
+aws iam get-account-summary \
+  --query 'SummaryMap.{AccountMFAEnabled:AccountMFAEnabled,AccountAccessKeysPresent:AccountAccessKeysPresent}'
+```
+
+Generate a credential report to check last activity. The report takes a moment to produce, so run the generate command first and then retrieve it:
+
+```bash
+aws iam generate-credential-report
+```
+
+The API returns the report as a base64-encoded string. AWS does this because the report is a CSV file and raw CSV with its commas, newlines, and quotes would break the JSON response if embedded directly. The `--query 'Content'` pulls out the encoded string, and `base64 -d` decodes it back into the CSV. The final `grep root` filters down to just the root user's row:
+
+```bash
+aws iam get-credential-report \
+  --query 'Content' \
+  --output text | base64 -d | grep root
+```
+
+The output is a CSV row. The columns to focus on are `mfa_active` (field 8), `access_key_1_active` (field 9), and `password_last_used` (field 5). If `access_key_1_active` is `true` that is an immediate finding.
+
+## Ensure CloudTrail Logging Is Set Up
+
+CloudTrail records every API call made in the account. Without it, there is no audit trail and incident response becomes guesswork. Check that a trail exists, that it covers all regions, that log file validation is on, and that it is actually delivering logs without errors.
+
+**What to check:**
+* A trail exists and is enabled
+* `IsMultiRegionTrail` is `true`
+* `LogFileValidationEnabled` is `true`
+* The trail is actively delivering logs with no recent delivery errors
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **3.1** (Ensure CloudTrail is enabled in all regions) and **3.2** (Ensure CloudTrail log file validation is enabled).
+
+List all trails and review their configuration:
+
+```bash
+aws cloudtrail describe-trails \
+  --query 'trailList[*].{Name:Name,MultiRegion:IsMultiRegionTrail,LogValidation:LogFileValidationEnabled,S3Bucket:S3BucketName,OrgTrail:IsOrganizationTrail}'
+```
+
+Check that logging is active and confirm no delivery errors (substitute `<trail-name>` from above):
+
+```bash
+aws cloudtrail get-trail-status \
+  --name <trail-name> \
+  --query '{IsLogging:IsLogging,LatestDeliveryTime:LatestDeliveryTime,LatestDeliveryError:LatestDeliveryError}'
+```
 
 ## Enforce MFA on Users
 
-## Restrict the Usage of Regions
+A username and password with no MFA is a single credential away from account compromise. Every IAM user with console access needs an MFA device attached. The credential report is the fastest way to find users who are out of compliance.
 
-AWS has all regions enabled by default. The problem with this is that most organiations only use a single or a small number of regions and monitor those. However, an malicious actor could deploy resources to a previously unused region and go unnoticed. For this, set a policy to restrict non-approved regions.
+**What to check:**
+* All IAM users with a password (console access) have MFA enabled
+* No users with console access have `mfa_active` set to `false`
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **1.10** (Ensure multi-factor authentication (MFA) is enabled for all IAM users that have a console password).
+
+Generate a fresh credential report:
+
+```bash
+aws iam generate-credential-report
+```
+
+Write the following to a file and run it. The `base64 -d` decodes the CSV from the JSON response, and `awk` filters for users who have a password enabled but `mfa_active` set to false:
+
+```bash
+#!/usr/bin/env bash
+aws iam get-credential-report \
+  --query 'Content' \
+  --output text | base64 -d | \
+  awk -F',' 'NR>1 && $4=="true" && $8=="false" {print $1}'
+```
+
+Any name that appears in the output is a finding.
+
+## Check for Stale Access Keys
+
+Long-lived access keys are one of the most common sources of account compromise. A key created years ago by someone who has since left, attached to a role with broad permissions, is an easy target. CIS requires keys to be rotated every 90 days. In practice, teams create them and forget them. The credential report surfaces this fast and almost always turns up findings.
+
+**What to check:**
+* No active access keys are older than 90 days
+* Keys that exist but have never been used should be disabled or deleted
+* No user has more than one active access key at the same time
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **1.14** (Ensure access keys are rotated every 90 days or less).
+
+Generate a fresh credential report first:
+
+```bash
+aws iam generate-credential-report
+```
+
+The API returns the report base64-encoded so it can travel safely inside the JSON response without the CSV's commas and newlines breaking the format. Write the following to a file and run it. `base64 -d` decodes the report back into CSV, and `awk` filters it down to active keys and their rotation and last-used dates:
+
+```bash
+#!/usr/bin/env bash
+aws iam get-credential-report \
+  --query 'Content' \
+  --output text | base64 -d | \
+  awk -F',' 'NR>1 {
+    user=$1
+    key1_active=$9
+    key1_last_rotated=$10
+    key1_last_used=$11
+    key2_active=$14
+    key2_last_rotated=$15
+    key2_last_used=$16
+    if (key1_active=="true") print user, "key1 rotated:", key1_last_rotated, "last used:", key1_last_used
+    if (key2_active=="true") print user, "key2 rotated:", key2_last_rotated, "last used:", key2_last_used
+  }'
+```
+
+Cross-reference the `rotated` dates against today. Any key older than 90 days is a finding. Any key where `last_used` is `N/A` has never been used and should be deleted.
 
 # VPC
 This section holds the plan for auditing VPC and the commands to do so. The VPC is the heart of it all. Here are the things to look for at the VPC level.
@@ -467,3 +594,7 @@ RDS should use IAM for permissions instead of relying on the underlying db. for 
 # Bedrock
 
 [Bedrock](https://aws.amazon.com/bedrock/) is for building and hosting AI models.
+
+# Route 53
+
+[Route 53](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html) is AWS's DNS service.
