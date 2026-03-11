@@ -1290,6 +1290,96 @@ for policy_arn in $(aws iam list-policies --scope Local --query 'Policies[*].Arn
 done
 ```
 
+## Check Permissions on EC2 Instance Profile Roles
+
+The EC2 section covered whether an instance profile exists. This check goes one level deeper and looks at what the role inside that profile is actually allowed to do. A compromised EC2 instance or EKS node inherits every permission on its attached role. An instance profile with `AdministratorAccess` or broad S3 and IAM permissions means a single compromised workload can access the entire account.
+
+This is one of the highest-risk findings in a cloud environment. In this company's case, EKS nodes and EC2 instances have IAM roles that likely carry S3 permissions for the data pipeline. Those roles should be scoped to exactly the buckets and actions each workload needs. Anything broader is a finding.
+
+Note: how IAM roles are assigned to individual pods inside EKS (IRSA and EKS Pod Identities) is covered in the EKS section.
+
+**What to check:**
+* No instance profile role has `AdministratorAccess` or `PowerUserAccess` attached
+* S3 permissions are scoped to specific bucket ARNs, not `arn:aws:s3:::*`
+* IAM permissions are absent from instance profile roles unless there is a documented reason
+* Roles are not shared across multiple applications or workloads with different permission needs
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — least privilege principles throughout section 1; directly supports **1.16** and **1.22** (Ensure access to AWSCloudShellFullAccess is restricted).
+
+List all instance profiles and their attached roles:
+
+```bash
+aws iam list-instance-profiles \
+  --query 'InstanceProfiles[*].{ProfileName:InstanceProfileName,Roles:Roles[*].RoleName}'
+```
+
+List the policies attached to a specific instance profile role (substitute `<role-name>` from above):
+
+```bash
+aws iam list-attached-role-policies \
+  --role-name <role-name> \
+  --query 'AttachedPolicies[*].{PolicyName:PolicyName,PolicyArn:PolicyArn}'
+```
+
+Inspect the full document of a policy attached to the role to review its actual permissions (substitute `<policy-arn>` and `<version-id>`):
+
+```bash
+aws iam get-policy-version \
+  --policy-arn <policy-arn> \
+  --version-id <version-id> \
+  --query 'PolicyVersion.Document' | jq .
+```
+
+Write the following to a file and run it to check every instance profile role for `AdministratorAccess` in one pass:
+
+```bash
+#!/usr/bin/env bash
+for profile in $(aws iam list-instance-profiles \
+  --query 'InstanceProfiles[*].InstanceProfileName' --output text); do
+  roles=$(aws iam get-instance-profile \
+    --instance-profile-name "$profile" \
+    --query 'InstanceProfile.Roles[*].RoleName' --output text)
+  for role in $roles; do
+    policies=$(aws iam list-attached-role-policies \
+      --role-name "$role" \
+      --query 'AttachedPolicies[*].PolicyArn' --output text)
+    if echo "$policies" | grep -q "AdministratorAccess"; then
+      echo "ADMIN ACCESS ON INSTANCE PROFILE: $profile / $role"
+    fi
+  done
+done
+```
+
+## Check IAM Access Analyzer
+
+[IAM Access Analyzer](https://docs.aws.amazon.com/IAM/latest/UserGuide/what-is-access-analyzer.html) continuously scans resource policies across the account and flags anything that grants access to an external principal, which could be another AWS account, a public endpoint, or an unknown federated identity. It also has a policy validation mode that checks policies for overly permissive statements before they are deployed. Think of it as automated, ongoing IAM review running in the background.
+
+The audit check here is simple: confirm it is enabled, and if it is, review any active findings. An Access Analyzer that has been enabled but has unreviewed findings sitting open is a problem in itself.
+
+**What to check:**
+* At least one analyzer exists and is in an `ACTIVE` state
+* There are no unreviewed findings, or all findings have been acknowledged with a documented reason
+* The analyzer type is `ACCOUNT` to cover all resources in the account, or `ORGANIZATION` if delegated from the management account
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **1.20** (Ensure that IAM Access analyzer is enabled for all regions).
+
+Check if Access Analyzer is enabled and its current status:
+
+```bash
+aws accessanalyzer list-analyzers \
+  --query 'analyzers[*].{Name:name,Status:status,Type:type,Region:arn}'
+```
+
+List any active findings from the analyzer (substitute `<analyzer-arn>` from above):
+
+```bash
+aws accessanalyzer list-findings \
+  --analyzer-arn <analyzer-arn> \
+  --filter '{"status": {"eq": ["ACTIVE"]}}' \
+  --query 'findings[*].{Id:id,ResourceType:resourceType,Resource:resource,Condition:condition}'
+```
+
+Any finding with a status of `ACTIVE` that has not been reviewed is a finding in the audit report.
 
 # EKS
 
