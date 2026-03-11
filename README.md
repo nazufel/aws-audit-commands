@@ -1381,142 +1381,633 @@ aws accessanalyzer list-findings \
 
 Any finding with a status of `ACTIVE` that has not been reviewed is a finding in the audit report.
 
-# EKS
+# Elastic Kubernetes Service (EKS)
 
-This section holds the plan for auditing EKS cluster and the commands to do so. The objective here is to be able to go through the main parts of a [Kubernetes](https://kubernetes.io/docs/home/) cluster and identify the main components that need to be secured.
+This section holds the plan for auditing an [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster and the commands to do so. The objective is to walk through the main components of a [Kubernetes](https://kubernetes.io/docs/home/) cluster and identify what needs to be secured. Kubernetes has many moving parts — this section focuses on the ones that carry the most security risk.
 
-> Use api-resources to get a list of things to query the Kube API for in case the names can't be figured out
+If a resource type referenced below does not seem to exist in the cluster, use the following command to see what resource types the cluster actually has:
 
 ```bash
 kubectl api-resources -o wide
 ```
 
-## List Out Kubernetes Clusters and Versions
+## List Clusters and Check Versions
 
-Check to see if the clusters are running supported versions of Kubernetes or End of Life.
+Running a Kubernetes version that is past its end-of-life means no security patches are being issued for it. EKS supports a specific set of Kubernetes minor versions at any given time and drops support on a regular schedule. The kubelet version on each node must also match or be within one minor version of the control plane.
 
-## Add a Cluster to kubeconfing
+**What to check:**
+* The cluster is running a Kubernetes version currently supported by EKS
+* Node groups are running a kubelet version compatible with the control plane
+* The EKS platform version is current
 
-Add the cluster to your [kubeconfig](https://kubernetes.io/docs/concepts/configuration/organize-cluster-access-kubeconfig/) at this stage so that connection and auditing of it later can be achieved. 
+List all EKS clusters in the account:
 
-> Use tools like [kubectx](https://github.com/ahmetb/kubectx) or [K9s](https://k9scli.io/) to manage your contexts.
+```bash
+aws eks list-clusters \
+  --query 'clusters'
+```
 
-## Check for Private Clusters 
+Describe a cluster to see its Kubernetes version and platform version (substitute `<cluster-name>` from above):
 
-The Kubernetes control plane should not be publicly exposed. Building private clusters is reccomended,. The following command(s) check to see if the cluster is prublic or private.
+```bash
+aws eks describe-cluster \
+  --name <cluster-name> \
+  --query 'cluster.{Name:name,Version:version,PlatformVersion:platformVersion,Status:status}'
+```
 
-## Check to See if etcd Is Configured with Encryption at Rest 
+List all node groups and their AMI and kubelet versions:
 
-[etcd](https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/) stores data in plain text by default. Encrypted state should be set. 
+```bash
+aws eks list-nodegroups \
+  --cluster-name <cluster-name> \
+  --query 'nodegroups'
+```
+
+```bash
+aws eks describe-nodegroup \
+  --cluster-name <cluster-name> \
+  --nodegroup-name <nodegroup-name> \
+  --query 'nodegroup.{Status:status,AmiType:amiType,Version:version,ReleaseVersion:releaseVersion}'
+```
+
+## Add a Cluster to kubeconfig
+
+Add the cluster to the local [kubeconfig](https://kubernetes.io/docs/concepts/configuration/organize-cluster-access-kubeconfig/) so that `kubectl` commands can reach it. Pass `--profile` if the cluster is in a different account than the default profile:
+
+```bash
+aws eks update-kubeconfig \
+  --name <cluster-name> \
+  --region <region>
+```
+
+> Use tools like [kubectx](https://github.com/ahmetb/kubectx) or [K9s](https://k9scli.io/) to manage multiple cluster contexts efficiently.
+
+## Check for a Private Control Plane
+
+The Kubernetes API server is the control plane endpoint that `kubectl` communicates with. A publicly exposed API server is reachable from the internet and is a target for credential stuffing and API exploits. The recommended configuration is private-only access, where the API server is only reachable from within the VPC. If public access must remain on, it should be restricted to specific CIDR blocks.
+
+**What to check:**
+* `endpointPublicAccess` is `false`, or if `true`, `publicAccessCidrs` does not contain `0.0.0.0/0`
+* `endpointPrivateAccess` is `true`
+* Node groups are deployed in private subnets, not public ones
+
+Check the cluster's endpoint configuration:
+
+```bash
+aws eks describe-cluster \
+  --name <cluster-name> \
+  --query 'cluster.resourcesVpcConfig.{PublicAccess:endpointPublicAccess,PrivateAccess:endpointPrivateAccess,PublicCIDRs:publicAccessCidrs}'
+```
+
+Check which subnets each node group is using and confirm they are private subnets:
+
+```bash
+aws eks describe-nodegroup \
+  --cluster-name <cluster-name> \
+  --nodegroup-name <nodegroup-name> \
+  --query 'nodegroup.{NodegroupName:nodegroupName,Subnets:subnets}'
+```
+
+Cross-reference the subnet IDs against the VPC section findings to confirm they are private and route through a NAT Gateway rather than an internet gateway.
+
+## Check etcd Encryption at Rest
+
+[etcd](https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/) is the key-value store that holds all Kubernetes cluster state, including Secrets. Without envelope encryption configured, Secrets are stored in plaintext in etcd. Anyone who gains access to the etcd data — through a backup, a snapshot, or direct storage access — can read every Secret in the cluster.
+
+**What to check:**
+* An `encryptionConfig` is defined on the cluster
+* The resource type `secrets` is listed in the encryption configuration
+* The encryption provider references a KMS key, not a static key
+
+Check the cluster's encryption configuration. An empty result means no encryption is configured:
+
+```bash
+aws eks describe-cluster \
+  --name <cluster-name> \
+  --query 'cluster.encryptionConfig'
+```
 
 ## Nodes
 
-This section contains commands and things to check for the Kubernetes Nodes.
+Node groups are the EC2 instances that run workloads. The node section focuses on version currency, placement, and what runs on the nodes at the system level.
 
-### List out the Nodes and Versions
+**What to check:**
+* All nodes show a `Ready` status with no persistent `NotReady` nodes
+* Node AMI versions are current and not significantly behind the latest release
+* Nodes are spread across multiple availability zones for availability
+* Node groups are in private subnets (see the control plane check above for the subnet cross-reference)
 
-Check to ensure nodes and node groups are running supported versions of the kubelet.
+List all nodes and their status, version, and which zone they are in:
 
 ```bash
-kubectl get nodes
+kubectl get nodes \
+  -o wide
+```
+
+Write the following to a file and run it to list each node group and confirm its nodes are in private subnets:
+
+```bash
+#!/usr/bin/env bash
+for ng in $(aws eks list-nodegroups \
+  --cluster-name <cluster-name> \
+  --query 'nodegroups' --output text); do
+  echo "=== Nodegroup: $ng ==="
+  aws eks describe-nodegroup \
+    --cluster-name <cluster-name> \
+    --nodegroup-name "$ng" \
+    --query 'nodegroup.{Subnets:subnets,AmiType:amiType,Version:version}'
+done
 ```
 
 ## Namespaces
 
-A [Namespace](https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/) is how Kubernetes organizes resources. 
+[Namespaces](https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/) are the primary way Kubernetes organizes and isolates resources. The `default` namespace is a common dumping ground for workloads that were deployed without a namespace specified. Production workloads should live in dedicated namespaces with their own RBAC, resource quotas, and network policies. The `kube-system` namespace contains cluster-level system components and should be treated as off-limits for application workloads.
 
-## Deployments, ReplicaSets, StatefulSets, DaemonSets, and Pods
+**What to check:**
+* No application workloads are deployed in the `default` namespace
+* Each application namespace has a `ResourceQuota` defined to prevent a single workload from consuming all cluster resources
+* Each namespace has a `LimitRange` to set default resource requests and limits for pods that do not define their own
 
-These are the ways a workload can run in a cluster. Besure to list them out and understand what's running.
+List all namespaces:
 
-### Check for Reccomended Tagging
+```bash
+kubectl get namespaces
+```
 
-The should have the following reccomended labels:
-* Owning/Repsonsble Team
-* Cost Center
-* Data Classification
-* Response SLA
+Check what is running in the default namespace. Any application workload here is a finding:
 
-### Resources
+```bash
+kubectl get all -n default
+```
 
-Kubernetes workloads needs to have [resource](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) limits and requests defined. Defining these helps Kubernetes know how much resourcs to give a Pod and how much to limit it so that it doesn't become a noisy neighbor.
+Check which namespaces are missing a ResourceQuota:
 
-## Autoscalers
+```bash
+kubectl get resourcequota \
+  --all-namespaces
+```
 
-Kubernetes has the ability to [autoscale](https://kubernetes.io/docs/concepts/workloads/autoscaling/) worklaods up or down. This can be a Horizatonal Pod Autoscaler that scales up and down the number of Pods in a cluster based on load or a Vertical Pod Autoscaler that increases or decreases the amount of resources a Pod can request and consume. Check to ensure all necessary workloads have these.
+Check which namespaces are missing a LimitRange:
 
-## Pod Security Context Pod and Container-Levels
+```bash
+kubectl get limitrange \
+  --all-namespaces
+```
 
-Pods can have a [Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/) that defines privilege and access control. There are to place this can be defined in the Pod spec:
+## Workloads
 
-### 1. Pod Spec `.spec.securityContext`
+Workloads are the applications running inside the cluster. [Deployments](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/), [StatefulSets](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/), [DaemonSets](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/), and standalone [Pods](https://kubernetes.io/docs/concepts/workloads/pods/) are the main types. List them out across all namespaces and understand what is running before auditing individual configurations.
 
-The Pod spec contains settings applied to the entire Pod. The spec looks like so:
+List all workloads across all namespaces:
+
+```bash
+kubectl get deployments,statefulsets,daemonsets,pods \
+  --all-namespaces
+```
+
+### Labels
+
+Kubernetes labels are the equivalent of AWS tags. They are used for identifying ownership, routing traffic, applying policies, and incident attribution. The following labels are recommended on all workloads:
+
+* `app.kubernetes.io/name` — the name of the application
+* `app.kubernetes.io/owner` or `team` — the owning team
+* `environment` — `production`, `staging`, `development`
+* `data-classification` — sensitivity of data the workload handles
+* `cost-center` — for billing attribution
+* `response-sla` — how quickly the owning team responds to incidents
+
+Check labels on all pods in a namespace (substitute `<namespace>`):
+
+```bash
+kubectl get pods \
+  -n <namespace> \
+  --show-labels
+```
+
+### Resource Limits and Requests
+
+Kubernetes workloads need [resource limits and requests](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) defined. A pod with no limits can consume all CPU and memory on a node and starve other workloads. A pod with no requests cannot be scheduled accurately. Both are required for the cluster to function predictably under load.
+
+**What to check:**
+* Every container has `resources.requests.cpu` and `resources.requests.memory` defined
+* Every container has `resources.limits.cpu` and `resources.limits.memory` defined
+* No container has limits set dramatically higher than its requests without a documented reason
+
+Write the following to a file and run it to find pods missing resource definitions in a namespace:
+
+```bash
+#!/usr/bin/env bash
+kubectl get pods -n <namespace> -o json | \
+  jq -r '.items[] | select(
+    .spec.containers[].resources.limits == null or
+    .spec.containers[].resources.requests == null
+  ) | .metadata.name'
+```
+
+## Pod Security Context
+
+Pods can have a [Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/) that defines privilege and access control settings. These settings exist at two levels: the pod spec (applying to all containers in the pod) and the individual container spec (applying to a single container). Security contexts are one of the most impactful areas to audit because a single privileged container can be enough to escape the container boundary and gain access to the host node.
+
+### Pod-Level Security Context
+
+The pod-level spec applies to all containers in the pod. The most important settings are:
 
 ```yaml
 spec:
   securityContext:
+    runAsNonRoot: true
     runAsUser: 1000
     runAsGroup: 3000
     fsGroup: 2000
-    supplementalGroups: [4000]
 ```
 
-Ensure the Pod is not running as root.
+**What to check:**
+* `runAsNonRoot` is `true` — the container process should never run as UID 0
+* `runAsUser` is set to a non-zero UID
+* No pod has `hostPID: true`, `hostIPC: true`, or `hostNetwork: true` — these share the node's process, IPC, or network namespaces with the container and are rarely legitimate
 
-### 2. Container definitions `.spec.contianers[*].securityContext`. 
+### Container-Level Security Context
 
-The containers spec defines settings applied to the individual container inside of the Pod. Pods can have one or more containers. The spec looks like so:
+The container-level spec applies to a single container and can override the pod-level settings:
 
 ```yaml
-  containers:
-    ...
+containers:
+  - name: my-app
     securityContext:
       allowPrivilegeEscalation: false
+      privileged: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
 ```
 
-## Services, Gateway, and Network Policies
+**What to check:**
+* `allowPrivilegeEscalation` is `false` on every container
+* `privileged` is `false` — a privileged container has nearly full access to the host
+* `readOnlyRootFilesystem` is `true` where possible
+* `capabilities` drops `ALL` and adds back only what is explicitly required
 
-These components affect the routing and control of traffic within and outside of the cluster.
+Write the following to a file and run it to find any privileged containers or containers allowing privilege escalation across the cluster:
 
-### Services
+```bash
+#!/usr/bin/env bash
+kubectl get pods --all-namespaces -o json | jq -r '
+  .items[] |
+  .metadata.namespace as $ns |
+  .metadata.name as $pod |
+  .spec.containers[] |
+  select(
+    .securityContext.privileged == true or
+    .securityContext.allowPrivilegeEscalation == true
+  ) |
+  "\($ns)/\($pod): privileged=\(.securityContext.privileged) escalation=\(.securityContext.allowPrivilegeEscalation)"
+'
+```
 
-Kubernetes uses [Services](https://kubernetes.io/docs/concepts/services-networking/service/) to expose groups of Pods for networking. There are multiple [types](https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types) of services. Check the services to ensure they are routing to the proper Pods. A reccomendation would to use the ClusterIP type unless explicitly necessary. ClusterIPs route traffic internally without exposing it to the network outside of the cluster. A different resource is used routing traffic in and out of a cluster.
+### Pod Security Admission
+
+[Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/) (PSA) is the Kubernetes-native way to enforce security context standards at the namespace level. Rather than checking each pod manually, PSA applies a policy to the entire namespace that prevents non-compliant pods from being scheduled. There are three built-in policy levels:
+
+* `privileged` — no restrictions, used for system-level namespaces like `kube-system`
+* `baseline` — blocks the most dangerous configurations (privileged containers, hostPID, etc.)
+* `restricted` — the strictest policy, requires most of the security context settings above
+
+Check whether PSA labels are applied to namespaces:
+
+```bash
+kubectl get namespaces \
+  -o json | jq -r '.items[] | "\(.metadata.name): \(.metadata.labels | to_entries | map(select(.key | startswith("pod-security"))) | from_entries)"'
+```
+
+Any namespace running application workloads that shows no `pod-security` labels is operating with no enforcement.
+
+## Services
+
+Kubernetes uses [Services](https://kubernetes.io/docs/concepts/services-networking/service/) to expose groups of pods on the network. The service type determines who can reach it. `ClusterIP` is reachable only within the cluster. `NodePort` opens a port on every node. `LoadBalancer` provisions an AWS load balancer and exposes the service externally. Most internal services should be `ClusterIP`.
+
+**What to check:**
+* No services are of type `LoadBalancer` unless they are intentionally public-facing and covered by the WAF/ALB architecture from the Networking section
+* No services are of type `NodePort` without a documented reason
+* Services are selecting the correct pods via their label selectors
+
+List all services and their types across all namespaces:
+
+```bash
+kubectl get services \
+  --all-namespaces \
+  -o wide
+```
+
+Write the following to a file and run it to flag any `LoadBalancer` or `NodePort` services:
+
+```bash
+#!/usr/bin/env bash
+kubectl get services --all-namespaces -o json | jq -r '
+  .items[] |
+  select(.spec.type == "LoadBalancer" or .spec.type == "NodePort") |
+  "\(.metadata.namespace)/\(.metadata.name): \(.spec.type)"
+'
+```
+
+## Network Policies
+
+By default, Kubernetes applies no network restrictions between pods. Every pod in the cluster can reach every other pod on any port. [Network Policies](https://kubernetes.io/docs/concepts/services-networking/network-policies/) are the Kubernetes resource that implements microsegmentation — restricting which pods can communicate with which. Without them, a compromised pod can freely scan and connect to any other pod in the cluster, including databases, internal APIs, and the Kubernetes API server.
+
+Network policies require a CNI plugin that supports them (such as Calico, Cilium, or Weave). If the cluster's CNI does not support network policies, the resources can be created but they will have no effect.
+
+**What to check:**
+* Network policies exist in every namespace running application workloads
+* A default-deny policy exists in each namespace (deny all ingress and egress by default, then allow only what is needed)
+* No policy uses overly broad selectors like `podSelector: {}` with unrestricted ports on both ingress and egress
+
+List all network policies across all namespaces:
+
+```bash
+kubectl get networkpolicies \
+  --all-namespaces \
+  -o wide
+```
+
+Write the following to a file and run it to identify namespaces with no network policies defined:
+
+```bash
+#!/usr/bin/env bash
+all_ns=$(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}')
+for ns in $all_ns; do
+  count=$(kubectl get networkpolicies -n "$ns" --no-headers 2>/dev/null | wc -l)
+  if [ "$count" -eq 0 ]; then
+    echo "NO NETWORK POLICIES: $ns"
+  fi
+done
+```
 
 ## Gateway
 
-[Gateway](https://kubernetes.io/docs/concepts/services-networking/gateway/) is the newest version of Ingress. This is how traffic is routed into and out of the cluster. Gateways use providers much like Ingress. Ensure those components are up to date and supported. Remove any uncessary Gateway routes.
+[Gateway API](https://kubernetes.io/docs/concepts/services-networking/gateway/) is the current standard for routing traffic into and out of the cluster, replacing the older Ingress resource. Gateways use a controller (such as the AWS Load Balancer Controller) to provision and manage external load balancers. The Gateway and its routes define exactly which traffic is allowed in and where it goes.
 
-## ConfigMaps, Secrets, and Volumes
+**What to check:**
+* The Gateway controller is running a supported, up-to-date version
+* No `HTTPRoute` or `GRPCRoute` resources expose internal services that should not be externally reachable
+* All routes require TLS — no unencrypted HTTP routes in production
+* Unused Gateway resources are removed
 
-### ConfigMaps
+List all Gateways and their status:
 
-[ConfigMap]s are used to inject configurations into a Pod. They can be mounted as enviorment variables or as a file on the container's filesystem. Read through the ConfigMaps to ensure no secrets or other sensative information is kept in them. 
+```bash
+kubectl get gateways \
+  --all-namespaces \
+  -o wide
+```
 
-### Secrets
+List all HTTPRoutes and what they route to:
 
-[Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) are a way to inject sensative information into a Pod. Reccomendations for securing these are taken right from the Kubernetes documentation:
+```bash
+kubectl get httproutes \
+  --all-namespaces \
+  -o wide
+```
+
+## ConfigMaps
+
+[ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/) inject configuration into pods as environment variables or files on the container filesystem. The most common finding is secrets stored in ConfigMaps — database passwords, API keys, tokens — because it was convenient and the developer did not want to deal with Kubernetes Secrets. ConfigMaps are not encrypted and anyone with read access to the namespace can read them in plaintext.
+
+**What to check:**
+* No ConfigMap contains passwords, tokens, API keys, or any value that should be a Secret
+* No ConfigMap is deployed in the `default` namespace
+
+List all ConfigMaps across all namespaces:
+
+```bash
+kubectl get configmaps \
+  --all-namespaces
+```
+
+Inspect a specific ConfigMap for sensitive values (substitute `<name>` and `<namespace>`):
+
+```bash
+kubectl get configmap <name> \
+  -n <namespace> \
+  -o yaml
+```
+
+Write the following to a file and run it to scan ConfigMaps for common patterns that suggest secrets are stored in them:
+
+```bash
+#!/usr/bin/env bash
+kubectl get configmaps --all-namespaces -o json | \
+  jq -r '.items[] | "\(.metadata.namespace)/\(.metadata.name)" as $cm |
+    .data // {} | to_entries[] |
+    select(.key | test("password|secret|token|key|credential"; "i")) |
+    "\($cm): suspicious key: \(.key)"'
+```
+
+## Secrets
+
+[Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) are the Kubernetes resource for injecting sensitive information into pods. They are base64-encoded, not encrypted. Anyone with API access can retrieve and decode them. The Kubernetes documentation states this directly:
 
 > Kubernetes Secrets are, by default, stored unencrypted in the API server's underlying data store (etcd). Anyone with API access can retrieve or modify a Secret, and so can anyone with access to etcd. Additionally, anyone who is authorized to create a Pod in a namespace can use that access to read any Secret in that namespace; this includes indirect access such as the ability to create a Deployment.
 
 > In order to safely use Secrets, take at least the following steps:
-
 > * Enable Encryption at Rest for Secrets.
 > * Enable or configure RBAC rules with least-privilege access to Secrets.
 > * Restrict Secret access to specific containers.
->* Consider using external Secret store providers.
+> * Consider using external Secret store providers.
 
-## Roles, RoleBindings, ClusterRoles, and ClusterRoleBindings
+**What to check:**
+* etcd encryption is configured for Secrets (covered in the etcd section above)
+* RBAC restricts which service accounts and users can read Secrets
+* An external secrets operator is in use — tools like [External Secrets Operator](https://external-secrets.io/) or [Secrets Store CSI Driver](https://secrets-store-csi-driver.sigs.k8s.io/) pull secrets from AWS Secrets Manager or Parameter Store at runtime, keeping them out of etcd entirely
 
-### Check If IRSA or EKS Pod Identites Is Being Used
+List all Secrets across all namespaces:
 
-If neither are in use, then reccomend EKS Pod Identities.
+```bash
+kubectl get secrets \
+  --all-namespaces
+```
+
+Check whether an external secrets solution is installed:
+
+```bash
+kubectl get pods \
+  --all-namespaces \
+  -l 'app.kubernetes.io/name in (external-secrets,secrets-store-csi-driver)'
+```
+
+## RBAC
+
+[RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) (Role-Based Access Control) governs what every identity in the cluster is allowed to do. The core resources are `Role` and `ClusterRole` (which define permissions), and `RoleBinding` and `ClusterRoleBinding` (which assign those permissions to identities). The scope difference: a `Role` is namespace-scoped, a `ClusterRole` applies across the entire cluster.
+
+### ClusterRoles and ClusterRoleBindings
+
+A `ClusterRoleBinding` that assigns `cluster-admin` to any non-system identity gives that identity unrestricted access to every resource in every namespace. This is the Kubernetes equivalent of `AdministratorAccess` in IAM. It is a common finding in clusters where operators needed quick access and granted cluster-admin rather than creating a scoped role.
+
+**What to check:**
+* `cluster-admin` is bound only to system-level service accounts (`system:masters`, `system:node`, etc.) and specific documented admin identities
+* No `ClusterRole` grants wildcard verbs (`*`) on sensitive resources like `secrets`, `pods/exec`, or `*`
+* `RoleBindings` and `ClusterRoleBindings` reference identities that still exist and are still needed
+
+List all ClusterRoleBindings and what they grant to whom:
+
+```bash
+kubectl get clusterrolebindings \
+  -o wide
+```
+
+Check exactly which subjects have `cluster-admin` bound to them:
+
+```bash
+kubectl get clusterrolebindings \
+  -o json | jq -r '
+    .items[] |
+    select(.roleRef.name == "cluster-admin") |
+    "\(.metadata.name): \(.subjects // [] | map("\(.kind)/\(.name)") | join(", "))"
+  '
+```
+
+List all ClusterRoles that grant wildcard verbs:
+
+```bash
+kubectl get clusterroles \
+  -o json | jq -r '
+    .items[] |
+    select(.rules[]?.verbs[]? == "*") |
+    .metadata.name
+  '
+```
+
+### IRSA and EKS Pod Identities
+
+Pods that need AWS API access (reading from S3, calling Bedrock, writing to DynamoDB) need AWS credentials. The wrong answers are hardcoding access keys in the pod spec or relying on the node's IAM role (all pods on the node would share those permissions). The right answer is to give each workload its own IAM role scoped to exactly what it needs. AWS provides two mechanisms to do this.
+
+#### IRSA (IAM Roles for Service Accounts)
+
+IRSA uses OIDC federation. The EKS cluster has an OIDC issuer URL. That issuer is registered as a trusted identity provider in IAM. An IAM role is created with a trust policy that allows the OIDC provider to assume it, scoped to a specific Kubernetes service account in a specific namespace. The Kubernetes service account is annotated with the IAM role ARN. When a pod uses that service account, a mutating webhook injects two environment variables into the pod: `AWS_WEB_IDENTITY_TOKEN_FILE` (a short-lived JWT) and `AWS_ROLE_ARN`. The AWS SDK reads these automatically and calls STS `AssumeRoleWithWebIdentity` to retrieve temporary credentials.
+
+The trust policy in the IAM role looks like this:
+
+```json
+{
+  "Effect": "Allow",
+  "Principal": {
+    "Federated": "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
+  },
+  "Action": "sts:AssumeRoleWithWebIdentity",
+  "Condition": {
+    "StringEquals": {
+      "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE:sub": "system:serviceaccount:my-namespace:my-service-account"
+    }
+  }
+}
+```
+
+The `Condition` clause is the critical scoping mechanism. Without it, any pod in any namespace using any service account in the cluster could assume the role.
+
+#### EKS Pod Identities
+
+EKS Pod Identities is the newer mechanism (launched 2023) and is simpler to operate at scale. It requires the `eks-pod-identity-agent` add-on, which runs as a DaemonSet on each node. Instead of annotating service accounts, you create a "Pod Identity Association" in EKS that maps a specific namespace and service account to an IAM role. The role's trust policy only needs to trust `pods.eks.amazonaws.com` — this is set once and works for any cluster, unlike IRSA which requires a per-cluster OIDC provider in the trust policy.
+
+The trust policy looks like this:
+
+```json
+{
+  "Effect": "Allow",
+  "Principal": {
+    "Service": "pods.eks.amazonaws.com"
+  },
+  "Action": [
+    "sts:AssumeRole",
+    "sts:TagSession"
+  ]
+}
+```
+
+**When to use which:** New workloads should use Pod Identities. It is simpler, scales better across multiple clusters, and is AWS's recommended path going forward. Existing IRSA setups do not need to be migrated immediately, but note them and recommend eventual migration.
+
+#### How to Detect Which Is in Use
+
+Check whether the cluster has an OIDC issuer configured (indicates IRSA is possible):
+
+```bash
+aws eks describe-cluster \
+  --name <cluster-name> \
+  --query 'cluster.identity.oidc'
+```
+
+Check whether that OIDC provider is registered in IAM:
+
+```bash
+aws iam list-open-id-connect-providers
+```
+
+Check whether service accounts have the IRSA role annotation:
+
+```bash
+kubectl get serviceaccounts \
+  --all-namespaces \
+  -o json | jq -r '
+    .items[] |
+    select(.metadata.annotations."eks.amazonaws.com/role-arn" != null) |
+    "\(.metadata.namespace)/\(.metadata.name): \(.metadata.annotations."eks.amazonaws.com/role-arn")"
+  '
+```
+
+Check whether the Pod Identity agent add-on is installed:
+
+```bash
+kubectl get daemonset eks-pod-identity-agent \
+  -n kube-system
+```
+
+List all Pod Identity Associations for the cluster:
+
+```bash
+aws eks list-pod-identity-associations \
+  --cluster-name <cluster-name>
+```
+
+Describe a specific association to see which service account it maps to and which role it uses:
+
+```bash
+aws eks describe-pod-identity-association \
+  --cluster-name <cluster-name> \
+  --association-id <association-id> \
+  --query 'association.{Namespace:namespace,ServiceAccount:serviceAccount,RoleArn:roleArn}'
+```
+
+#### Auditing the Permissions
+
+Once the IAM role ARN is identified (either from the service account annotation for IRSA or from the Pod Identity Association), the IAM audit steps from the IAM section apply. Check the role for wildcard policies, `AdministratorAccess`, and any permissions that go beyond what the specific workload needs.
+
+For IRSA, also verify the trust policy condition is scoped to the specific service account and not open to all service accounts in the cluster:
+
+```bash
+aws iam get-role \
+  --role-name <role-name> \
+  --query 'Role.AssumeRolePolicyDocument' \
+  --output text | jq .
+```
+
+If the trust policy has no `Condition` block, or the `sub` condition uses a wildcard, any pod in the cluster can assume that role. That is a critical finding.
 
 ## CRDs
 
-# RDS
+[Custom Resource Definitions](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/) extend the Kubernetes API with custom resource types. Most cluster add-ons (cert-manager, the AWS Load Balancer Controller, External Secrets Operator) install CRDs. The security concern is CRDs from unknown or unmanaged sources, and CRDs whose controllers have not been updated.
 
-[Relational Database Service](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html) (RDS) runs managed relational databases. 
+**What to check:**
+* All CRDs have a known, documented source
+* CRD controllers are running supported versions
+
+List all CRDs and their creation date:
+
+```bash
+kubectl get crds \
+  -o wide
+```
+
+# Relational Database Service (RDS)
+
+[RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html) runs managed relational databases. 
 
 RDS should use IAM for permissions instead of relying on the underlying db. for example, the postgres user should have a role grant of `rds_iam` to tell it to accept an iam token instead of a username and password.
 
@@ -1530,7 +2021,9 @@ RDS should use IAM for permissions instead of relying on the underlying db. for 
 
 [Route 53](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html) is AWS's DNS service.
 
-# KMS
+# Key Management Service (KMS)
+
+[KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) is for creating, hosting, and using keys for encryption.
 
 # TODO:
 
