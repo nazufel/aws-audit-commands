@@ -2,6 +2,209 @@
 
 Runbook of auditing an AWS environment and the commands to run.
 
+# CLI Cheat Sheet
+
+This section is a cheat sheet for the [aws](https://github.com/aws/aws-cli) and [kubectl](https://kubernetes.io/docs/reference/kubectl/) command line interface (cli) tools used in this document.
+
+## AWS CLI
+
+The `aws` CLI is the primary way to interact with AWS from the command line.
+
+### Check Your Current Identity
+
+Before running any audit commands, confirm which account and role you are operating as. This is the AWS equivalent of `whoami` and should be the first thing you run after authenticating:
+
+```bash
+aws sts get-caller-identity
+```
+
+The output shows your `Account` ID, `UserId`, and the full `Arn` of the role or user you are acting as. If any of these are unexpected, stop and re-authenticate.
+
+### Profiles
+
+A profile is a named set of credentials and configuration stored in `~/.aws/credentials` and `~/.aws/config`. Profiles let you switch between accounts and roles without re-entering credentials.
+
+List all configured profiles:
+
+```bash
+aws configure list-profiles
+```
+
+Run any command using a specific profile with the `--profile` flag:
+
+```bash
+aws sts get-caller-identity --profile <profile-name>
+```
+
+Set a profile for an entire terminal session so you do not have to pass `--profile` on every command:
+
+```bash
+export AWS_PROFILE=<profile-name>
+```
+
+### Switching Regions
+
+Most `aws` commands operate against a single region. Either pass `--region` on every command or set a default for the session:
+
+```bash
+aws ec2 describe-instances --region us-west-2
+```
+
+```bash
+export AWS_DEFAULT_REGION=us-west-2
+```
+
+Check which region is currently configured:
+
+```bash
+aws configure list | grep region
+```
+
+### Assuming a Role
+
+Cross-account auditing often requires assuming a role in the target account. The output contains temporary credentials that can be exported to the shell:
+
+```bash
+aws sts assume-role \
+  --role-arn arn:aws:iam::<account-id>:role/<role-name> \
+  --role-session-name audit-session
+```
+
+Write the following to a file and run it to assume a role and automatically export the credentials into the current shell session:
+
+```bash
+#!/usr/bin/env bash
+OUTPUT=$(aws sts assume-role \
+  --role-arn arn:aws:iam::<account-id>:role/<role-name> \
+  --role-session-name audit-session)
+
+export AWS_ACCESS_KEY_ID=$(echo "$OUTPUT" | jq -r '.Credentials.AccessKeyId')
+export AWS_SECRET_ACCESS_KEY=$(echo "$OUTPUT" | jq -r '.Credentials.SecretAccessKey')
+export AWS_SESSION_TOKEN=$(echo "$OUTPUT" | jq -r '.Credentials.SessionToken')
+```
+
+Run `aws sts get-caller-identity` afterwards to confirm the role was assumed.
+
+### Output Formats
+
+The default output is JSON. Use `--output` to change it per command:
+
+```bash
+aws ec2 describe-instances --output table
+```
+
+```bash
+aws ec2 describe-instances --output text
+```
+
+`table` is readable for quick spot-checks. `text` is useful for piping into other tools like `awk` or `cut`. `json` is best when piping into `jq`.
+
+### Filtering Output with --query
+
+The `--query` flag uses [JMESPath](https://jmespath.org/) to filter and reshape the response before it is printed. Every command in this document uses it. A few patterns worth knowing:
+
+Select specific fields from a list of objects:
+
+```bash
+aws ec2 describe-instances \
+  --query 'Reservations[*].Instances[*].{Id:InstanceId,State:State.Name}'
+```
+
+Filter a list to only matching items using `?`:
+
+```bash
+aws ec2 describe-instances \
+  --query 'Reservations[*].Instances[?State.Name==`running`].InstanceId'
+```
+
+Pull a single value from a single object:
+
+```bash
+aws sts get-caller-identity --query 'Account' --output text
+```
+
+## kubectl
+
+The `kubectl` client is the primary way to interact with a Kubernetes cluster from the command line.
+
+### Check Your Current Context
+
+A context in kubectl is a named combination of a cluster, a user, and a namespace. Always confirm which cluster you are pointed at before running commands:
+
+```bash
+kubectl config current-context
+```
+
+### List and Switch Contexts
+
+List all contexts stored in your kubeconfig:
+
+```bash
+kubectl config get-contexts
+```
+
+Switch to a different context:
+
+```bash
+kubectl config use-context <context-name>
+```
+
+[kubectx](https://github.com/ahmetb/kubectx) is a faster alternative for switching contexts and is worth installing.
+
+### Add an EKS Cluster to kubeconfig
+
+Authenticate to an EKS cluster and add it to your local kubeconfig so kubectl can reach it:
+
+```bash
+aws eks update-kubeconfig \
+  --name <cluster-name> \
+  --region <region>
+```
+
+Pass `--profile` if the cluster is in a different account than your default profile.
+
+### Set a Working Namespace
+
+Passing `-n <namespace>` on every command gets repetitive. Set a default namespace for the current context:
+
+```bash
+kubectl config set-context --current --namespace=<namespace>
+```
+
+### Output Formats
+
+The default output is a summary table. Use `-o` to change it:
+
+```bash
+kubectl get pods -o wide
+```
+
+```bash
+kubectl get pod <pod-name> -o yaml
+```
+
+```bash
+kubectl get pod <pod-name> -o json | jq .
+```
+
+`yaml` and `json` show the full resource spec including fields not shown in the default view, which is useful for auditing security contexts, labels, and annotations.
+
+### Get More Detail on a Resource
+
+`describe` gives a human-readable summary of a resource including events, which is useful for understanding what a resource is doing:
+
+```bash
+kubectl describe pod <pod-name> -n <namespace>
+```
+
+### List All Resource Types
+
+If a resource type referenced in this document does not seem to exist in the cluster, check what resource types the cluster actually has. Not every cluster has every resource type:
+
+```bash
+kubectl api-resources -o wide
+```
+
 # Organization
 
 An [Organization](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_introduction.html) is the largest object in AWS. It contain one or more AWS Accounts. Normally, [Service Control Policies](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html) would be applied at this level and trickle down into the containing accounts.
@@ -433,7 +636,7 @@ Security groups with inbound rules open to `0.0.0.0/0` on sensitive ports expose
 
 > **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **5.2** (Ensure no security groups allow ingress from 0.0.0.0/0 to remote server administration ports).
 
-Check for security groups with unrestricted SSH access:
+### Check for security groups with unrestricted SSH access:
 
 ```bash
 aws ec2 describe-security-groups \
@@ -442,7 +645,7 @@ aws ec2 describe-security-groups \
   --query 'SecurityGroups[*].{GroupId:GroupId,GroupName:GroupName,VpcId:VpcId}'
 ```
 
-Check for security groups with unrestricted RDP access:
+### Check for security groups with unrestricted RDP access:
 
 ```bash
 aws ec2 describe-security-groups \
@@ -451,7 +654,7 @@ aws ec2 describe-security-groups \
   --query 'SecurityGroups[*].{GroupId:GroupId,GroupName:GroupName,VpcId:VpcId}'
 ```
 
-Check for security groups that allow all inbound traffic from anywhere:
+### Check for security groups that allow all inbound traffic from anywhere:
 
 ```bash
 aws ec2 describe-security-groups \
@@ -490,7 +693,7 @@ aws ec2 describe-security-groups \
 
 ## Check VPC Peering Route Tables
 
-VPC peering connections link two VPCs so that traffic can flow between them. The risk is in the route tables — a broad route that allows any subnet in one VPC to reach any subnet in the other defeats the purpose of network segmentation. Each peering connection should route only the specific subnets that need to communicate, not entire VPC CIDR blocks.
+VPC peering connections link two VPCs so that traffic can flow between them. The risk is in the route tables. A broad route that allows any subnet in one VPC to reach any subnet in the other defeats the purpose of network segmentation. Each peering connection should route only the specific subnets that need to communicate, not entire VPC CIDR blocks.
 
 **What to check:**
 * VPC peering connections are intentional and documented
@@ -516,43 +719,213 @@ aws ec2 describe-route-tables \
 
 # EC2
 
-This section holds the plan for auditing EC2 server instances and the commands to do so.
+This section holds the plan for auditing [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) server instances and the commands to do so.
 
-## Check foe IMDSv2 Optional or Required
+## Check for IMDSv2
 
-The AWS [IMDS](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html) service provides metadata to instances. There is an SSRF vulnerability in [v1}(https://aws.amazon.com/blogs/security/how-to-use-policies-to-restrict-where-ec2-instance-credentials-can-be-used-from/) and it's best practice to use v2.  
+The AWS [IMDS](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html) service provides instance metadata and temporary credentials to applications running on the instance. IMDSv1 has a known [SSRF vulnerability](https://aws.amazon.com/blogs/security/how-to-use-policies-to-restrict-where-ec2-instance-credentials-can-be-used-from/) where an attacker who can make a server-side request to `169.254.169.254` can steal the instance's IAM credentials without any authentication. IMDSv2 requires a session token that must be fetched first, which blocks that attack. Every instance should have `HttpTokens` set to `required`.
 
-## Check If a Instance Has a Public IP 
+**What to check:**
+* Every instance has `MetadataOptions.HttpTokens` set to `required`, not `optional`
+* The org-level SCP (covered in the Organization section) is in place to prevent new instances from launching with IMDSv1 enabled
 
-Check if an instnace has a public IP and what services are running on that instnace. If an instnace has public IP, then first ask why and if it needs one. Then look to see what applications are running on it. 
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **5.6** (Ensure that EC2 Metadata Service only allows IMDSv2).
 
-## Check the Security Groups for Instances
+List all instances and their IMDS configuration. Any instance showing `optional` in the `HttpTokens` column is a finding:
 
-Check the security groups for an instance to see what traffic is allowed to reach the host.
+```bash
+aws ec2 describe-instances \
+  --query 'Reservations[*].Instances[*].{InstanceId:InstanceId,Name:Tags[?Key==`Name`]|[0].Value,HttpTokens:MetadataOptions.HttpTokens,State:State.Name}' \
+  --output table
+```
 
-## Check to See if Cloud Trail Logging Is Configured
+## Check EBS Encryption
 
-## Check the Use of NAT
+[EBS](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/AmazonEBS.html) volumes hold the filesystem data for EC2 instances. Unencrypted volumes expose data at rest if a snapshot is shared accidentally or if someone gains access to the underlying storage. Two things need to be true: default encryption should be enabled so new volumes are encrypted automatically, and existing volumes should be checked for any that were created before the default was set.
 
-## Check the Use of a WAF
+**What to check:**
+* Default EBS encryption is enabled for the account in this region
+* No existing volumes are unencrypted
+* Snapshot copies also inherit encryption
 
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **2.2.1** (Ensure EBS volume encryption is enabled in all regions).
+
+Check if default encryption is turned on for new EBS volumes in this region. The result should be `true`:
+
+```bash
+aws ec2 get-ebs-encryption-by-default
+```
+
+List all unencrypted volumes currently in the account:
+
+```bash
+aws ec2 describe-volumes \
+  --query 'Volumes[?Encrypted==`false`].{VolumeId:VolumeId,InstanceId:Attachments[0].InstanceId,Size:Size,State:State}'
+```
+
+## Check Instance Profiles
+
+EC2 instances that need AWS API access should use [IAM instance profiles](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2_instance-profiles.html). Instance Profiles are an IAM role attached directly to the instance. Think of it as the user the instance runs as. The instance then retrieves short-lived credentials from IMDS rather than relying on hardcoded access keys baked into the application or stored in a config file. An instance with no profile that is making AWS API calls is a candidate for having credentials stored somewhere they should not be.
+
+**What to check:**
+* Every instance that makes AWS API calls has an IAM instance profile attached
+* Instances with no profile attached are investigated for hardcoded credentials
+* The permissions on each profile follow least privilege — no `AdministratorAccess` or wildcard policies
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **1.18** (Ensure that IAM Access analyzer is enabled for all regions) supports this by flagging overly permissive roles; least privilege is a foundational CIS principle throughout section 1.
+
+List all instances and their attached profiles. Any instance showing `null` for `Profile` is worth investigating:
+
+```bash
+aws ec2 describe-instances \
+  --query 'Reservations[*].Instances[*].{InstanceId:InstanceId,Name:Tags[?Key==`Name`]|[0].Value,Profile:IamInstanceProfile.Arn,State:State.Name}' \
+  --output table
+```
 
 ## Check for Tags
 
-Check to see if the instance has necessary tagging:
-* Cost Center
-* Owning/Responsible Team
-* Response SLA
-* Service Level
-* Managed-by
+Tags are how you attribute resources to teams, environments, and cost centers. During an incident, an untagged instance with no owner is a serious problem. No one knows who owns it, what it runs, or who to call. Good tagging also makes it easier to scope findings to a specific environment and avoid accidentally reporting a dev instance as a production risk.
 
-## Check ELBs
+Recommended tags for EC2 instances:
+* `Name` — human-readable name for the instance
+* `Environment` — `production`, `staging`, `development`
+* `Owner` / `Team` — the team responsible for the instance
+* `CostCenter` — for billing attribution
+* `DataClassification` — what sensitivity of data the instance handles
+* `ManagedBy` — `terraform`, `cloudformation`, `manual`, etc.
+* `PatchGroup` — used by SSM Patch Manager to control patching schedules
+* `ResponseSLA` — how quickly the owning team responds to incidents involving this resource
 
-Check the ELBs to see what running instances are behind them and their configurations.
+List all instances and their tags:
 
-## Flow Logs
+```bash
+aws ec2 describe-instances \
+  --query 'Reservations[*].Instances[*].{InstanceId:InstanceId,State:State.Name,Tags:Tags}'
+```
 
-Check to see if Flow Logging is enabled on the ELBs.
+Write the following to a file and run it to find instances with no tags at all:
+
+```bash
+#!/usr/bin/env bash
+aws ec2 describe-instances \
+  --query 'Reservations[*].Instances[*].{InstanceId:InstanceId,Tags:Tags}' \
+  --output json | \
+  jq '.[] | .[] | select(.Tags == null or .Tags == []) | .InstanceId'
+```
+
+# Networking
+
+This section covers the controls around how traffic enters and exits the environment. These checks are distinct from the VPC-level checks where the VPC section focused on network configuration (flow logs, security groups, peering). This section focuses on the architecture decisions around how workloads are exposed and protected.
+
+## Check for Instances with Public IPs
+
+An EC2 instance with a public IP is directly reachable from the internet. Most production workloads should sit in private subnets and receive traffic only through a load balancer. A direct public IP bypasses the load balancer, the WAF, and any centralized logging of inbound requests. Every public IP on an instance should have a documented reason for existing.
+
+**What to check:**
+* Every instance with a public IP has a documented justification
+* Public instances are covered by a security group that restricts inbound access to only required ports
+* No instances in a private subnet have elastic IPs attached without explicit intent
+
+List all running instances that have a public IP assigned:
+
+```bash
+aws ec2 describe-instances \
+  --filters Name=instance-state-name,Values=running \
+  --query 'Reservations[*].Instances[?PublicIpAddress!=null].{InstanceId:InstanceId,Name:Tags[?Key==`Name`]|[0].Value,PublicIP:PublicIpAddress,SubnetId:SubnetId}'
+```
+
+## Check Network Address Translation Gateway Usage
+
+Private subnet instances need outbound internet access for things like package updates and API calls. A [Network Address Translation Gateway](https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html) (NAT) provides that outbound access without making the instance reachable from the internet. The alternative, giving instances public IPs, is the wrong answer. Check that private subnets route outbound traffic through a NAT Gateway, not directly to the internet gateway.
+
+**What to check:**
+* NAT Gateways exist and are in an `available` state
+* Route tables for private subnets point to a NAT Gateway for `0.0.0.0/0`, not an internet gateway
+* No active NAT instances are in use. NAT Gateways are the managed replacement and should be preferred
+
+List all NAT Gateways and their state:
+
+```bash
+aws ec2 describe-nat-gateways \
+  --filter Name=state,Values=available \
+  --query 'NatGateways[*].{NatGatewayId:NatGatewayId,VpcId:VpcId,SubnetId:SubnetId,State:State}'
+```
+
+List route tables and check that private subnets route through NAT, not an internet gateway:
+
+```bash
+aws ec2 describe-route-tables \
+  --query 'RouteTables[*].{RouteTableId:RouteTableId,VpcId:VpcId,Routes:Routes[?DestinationCidrBlock==`0.0.0.0/0`]}'
+```
+
+## Check Web Application Firewall Association with Load Balancers
+
+A [Web Application Firewall](https://docs.aws.amazon.com/waf/latest/developerguide/waf-chapter.html) (WAF) inspects HTTP/S traffic before it reaches the application and can block common attacks like SQL injection, cross-site scripting, and request flooding. A load balancer with no WAF attached is accepting all traffic directly. Check that every public-facing load balancer has a WAF Web ACL associated with it.
+
+**What to check:**
+* WAF Web ACLs exist in the account
+* Every public-facing Application Load Balancer has a Web ACL associated
+* Web ACLs have meaningful rules, not just the default allow-all
+
+List all WAF Web ACLs in the region:
+
+```bash
+aws wafv2 list-web-acls \
+  --scope REGIONAL \
+  --query 'WebACLs[*].{Name:Name,Id:Id,ARN:ARN}'
+```
+
+List the resources associated with a Web ACL (substitute `<web-acl-arn>` from above):
+
+```bash
+aws wafv2 list-resources-for-web-acl \
+  --web-acl-arn <web-acl-arn> \
+  --query 'ResourceArns'
+```
+
+AWS WAF supports [Managed Rule Groups](https://docs.aws.amazon.com/waf/latest/developerguide/waf-managed-rule-groups.html). These are pre-built rule sets that can be added to a Web ACL without writing rules from scratch. AWS publishes a free set called [AWS Managed Rules](https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups.html) that covers common threats like the OWASP Top 10, known bad inputs, and IP reputation lists. Third-party rule groups from vendors like F5 and Fortinet are also available through AWS Marketplace. If a Web ACL has no managed rule groups and no custom rules, that is worth flagging — an empty Web ACL attached to a load balancer provides no protection.
+
+## Check Load Balancer Configuration
+
+[Elastic Load Balancing](https://docs.aws.amazon.com/elasticloadbalancing/latest/userguide/what-is-load-balancing.html) (ELB) is the AWS service name, but it is an umbrella for three distinct load balancer types. Knowing which type you are looking at changes what you can and cannot configure:
+
+**[Application Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) (ALB)** operates at Layer 7 (HTTP/S). It understands URLs, host headers, and request content, which is what makes path-based and host-based routing possible. A WAF can only be attached to an ALB, not the other types. This is the right choice for web applications, APIs, and any workload where you need the WAF or need to route based on request content.
+
+**[Network Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/network/introduction.html) (NLB)** operates at Layer 4 (TCP/UDP). It does not inspect request content. It just routes connections based on IP and port. It handles very high throughput with low latency and is the right choice for non-HTTP workloads like databases, game servers, or any TCP/UDP service. A WAF cannot be attached to an NLB.
+
+**[Classic Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/classic/introduction.html) (CLB)** is the original and is considered legacy. If you see one in the environment, the recommendation is to migrate it to an ALB or NLB. New workloads should never use a CLB.
+
+The `describe-load-balancers` command used below covers ALBs and NLBs (both use the `elbv2` API). Classic Load Balancers use a separate `elb` API and are listed separately.
+
+Load balancers are the front door for most production traffic. Two things matter most from a security standpoint: all listeners should use HTTPS (not HTTP), and access logs should be enabled so there is a record of every request that comes through.
+
+**What to check:**
+* No listeners are configured for HTTP without a redirect rule pointing to HTTPS
+* Access logs are enabled and delivering to an S3 bucket
+* TLS policies on HTTPS listeners are not using deprecated protocols (TLS 1.0 or 1.1)
+
+List all load balancers:
+
+```bash
+aws elbv2 describe-load-balancers \
+  --query 'LoadBalancers[*].{Name:LoadBalancerName,Type:Type,Scheme:Scheme,State:State.Code,ARN:LoadBalancerArn}'
+```
+
+Check listeners on a load balancer for any using plain HTTP (substitute `<lb-arn>` from above):
+
+```bash
+aws elbv2 describe-listeners \
+  --load-balancer-arn <lb-arn> \
+  --query 'Listeners[*].{Port:Port,Protocol:Protocol,SslPolicy:SslPolicy}'
+```
+
+Check if access logs are enabled for a load balancer:
+
+```bash
+aws elbv2 describe-load-balancer-attributes \
+  --load-balancer-arn <lb-arn> \
+  --query 'Attributes[?Key==`access_logs.s3.enabled`]'
+```
 
 # S3
 
@@ -738,3 +1111,6 @@ RDS should use IAM for permissions instead of relying on the underlying db. for 
 # Route 53
 
 [Route 53](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html) is AWS's DNS service.
+
+# TODO:
+* Lamnbda
