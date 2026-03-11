@@ -927,28 +927,206 @@ aws elbv2 describe-load-balancer-attributes \
   --query 'Attributes[?Key==`access_logs.s3.enabled`]'
 ```
 
-# S3
+# Simple Storage Service (S3)
 
-This section holds the plan for auditing S3 buckets and the commands to do so.
+This section holds the plan for auditing [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) buckets and the commands to do so.
 
-## List Out Buckets
+The AWS CLI has three separate sub-commands for S3 and it is worth knowing which one to reach for:
 
-## Inspect the Permissions of Each Bucket 
+* `aws s3` is the high-level interface for working with objects inside buckets. It provides user-friendly commands like `cp`, `mv`, `sync`, `ls`, and `rm` that behave similarly to shell commands. This is what most people use day-to-day for moving data around.
 
-Check to see if it has uniform perissions, inheritance, or fine-grained access control. Also check to see if any buckets are public. Check to see if any buckets allow `AuthenticatedUsers` because this could be any AWS user from any account, not just the owning account.
+* `aws s3api` maps directly to the S3 REST API and is used to inspect and configure the bucket itself. Bucket policies, ACLs, encryption settings, versioning, public access blocks, and logging are all configured through `s3api`. Most commands in this section use `s3api` for this reason.
 
-## Check to for Tags
+* `aws s3control` handles account-level and organization-level S3 administrative features like S3 Access Points and S3 Batch Operations. Most audits do not require this unless the environment uses those specific features.
 
-Check for necessary tags:
-* Data Classification
-* Owning/Repsonsble Team
-* Cost Center
-* Object TTL
-* Managed-by
+A simple way to think about it: `aws s3` is for what is inside a bucket, `aws s3api` is for the bucket itself.
 
-## Check for Configured Access Logging
+Start by listing all buckets in the account. This is the inventory everything else is built from:
 
-Check to see if access logging is configured and there is a separate bucket for that.
+```bash
+aws s3api list-buckets \
+  --query 'Buckets[*].{Name:Name,Created:CreationDate}'
+```
+
+## Check Block Public Access
+
+A bucket that is publicly readable exposes every object in it to anyone on the internet with no authentication required. Given that customer datasets live in these buckets, a public bucket is a critical finding. AWS has a four-setting [Block Public Access](https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html) configuration that should be enabled on every bucket. All four settings should be `true`.
+
+**What to check:**
+* `BlockPublicAcls` is `true`
+* `IgnorePublicAcls` is `true`
+* `BlockPublicPolicy` is `true`
+* `RestrictPublicBuckets` is `true`
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **2.1.4** (Ensure that S3 Buckets are configured with Block Public Access).
+
+Check a single bucket (substitute `<bucket-name>` from the list above):
+
+```bash
+aws s3api get-public-access-block \
+  --bucket <bucket-name>
+```
+
+Write the following to a file and run it to check every bucket at once. Any bucket printed with `MISSING` or showing a `false` value needs attention:
+
+```bash
+#!/usr/bin/env bash
+for bucket in $(aws s3api list-buckets --query 'Buckets[*].Name' --output text); do
+  result=$(aws s3api get-public-access-block --bucket "$bucket" 2>/dev/null)
+  if [ $? -ne 0 ]; then
+    echo "MISSING BLOCK PUBLIC ACCESS: $bucket"
+  else
+    echo "$bucket:" $(echo "$result" | jq -c '.PublicAccessBlockConfiguration')
+  fi
+done
+```
+
+## Inspect Bucket Policies and ACLs
+
+Two separate controls govern access to a bucket. The bucket policy is an IAM-style JSON document that grants or denies access to specific principals. The bucket ACL is an older, simpler mechanism. Both need to be reviewed.
+
+The most important thing to check in bucket policies is whether HTTP access is explicitly denied. A bucket that allows unencrypted HTTP connections can expose data in transit. Every bucket should have a policy statement that denies any request where `aws:SecureTransport` is `false`.
+
+Check the bucket ACL for any grants to `AuthenticatedUsers` or `AllUsers`. `AuthenticatedUsers` does not mean users in your account. It means any authenticated AWS user from any account in the world. A grant to either of these groups is a critical finding.
+
+**What to check:**
+* The bucket policy contains a `Deny` statement on `aws:SecureTransport: false` (enforces HTTPS)
+* No ACL grants exist for `AllUsers` or `AuthenticatedUsers`
+* Cross-account access in the bucket policy is intentional and scoped to specific principals
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **2.1.1** (Ensure S3 Bucket Policy is set to deny HTTP requests).
+
+Check the bucket policy and look for a `SecureTransport` deny condition:
+
+```bash
+aws s3api get-bucket-policy \
+  --bucket <bucket-name> \
+  --output text | jq .
+```
+
+Check the bucket ACL for any public or cross-account grants:
+
+```bash
+aws s3api get-bucket-acl \
+  --bucket <bucket-name> \
+  --query 'Grants[*].{Grantee:Grantee,Permission:Permission}'
+```
+
+## Check Encryption at Rest
+
+All objects in buckets holding customer data should be encrypted at rest. S3 supports two main options: SSE-S3 (AWS-managed keys) and SSE-KMS (self-managed keys via AWS KMS). SSE-KMS is preferable for customer data because it gives independent control over the encryption key. The key can be rotated, restricted, or disabled separately from the bucket itself.
+
+**What to check:**
+* Every bucket has a default encryption configuration set
+* Buckets holding customer data use SSE-KMS, not SSE-S3
+* The KMS key used has automatic key rotation enabled
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **2.1.5** (Ensure that S3 Buckets are encrypted with AWS KMS).
+
+Check the default encryption setting on a bucket:
+
+```bash
+aws s3api get-bucket-encryption \
+  --bucket <bucket-name> \
+  --query 'ServerSideEncryptionConfiguration.Rules[*].{Algorithm:ApplyServerSideEncryptionByDefault.SSEAlgorithm,KMSKeyId:ApplyServerSideEncryptionByDefault.KMSMasterKeyID}'
+```
+
+Write the following to a file and run it to check encryption status across all buckets at once:
+
+```bash
+#!/usr/bin/env bash
+for bucket in $(aws s3api list-buckets --query 'Buckets[*].Name' --output text); do
+  result=$(aws s3api get-bucket-encryption --bucket "$bucket" 2>/dev/null | \
+    jq -r '.ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm')
+  echo "$bucket: ${result:-NOT ENCRYPTED}"
+done
+```
+
+## Check for S3 VPC Endpoints
+
+Traffic between EKS and S3 travels over the public internet by default, even though both are inside AWS. A [VPC Gateway Endpoint for S3](https://docs.aws.amazon.com/vpc/latest/privatelink/vpc-endpoints-s3.html) routes that traffic directly through the AWS backbone without it ever leaving the network. This is both more secure (no public internet exposure) and faster (lower latency, no NAT Gateway per-GB cost). For workloads uploading and downloading large datasets continuously, this endpoint matters.
+
+**What to check:**
+* An S3 VPC Gateway Endpoint exists for every VPC where EKS nodes run
+* The endpoint is in `available` state
+* Bucket policies use the `aws:sourceVpce` condition to deny access from outside the VPC endpoint. This ensures EKS traffic stays on the private path and any accidental public access is blocked at the policy level
+
+List all S3 VPC endpoints in the account:
+
+```bash
+aws ec2 describe-vpc-endpoints \
+  --filters Name=service-name,Values=com.amazonaws.us-east-1.s3 \
+  --query 'VpcEndpoints[*].{EndpointId:VpcEndpointId,VpcId:VpcId,State:State,Type:VpcEndpointType}'
+```
+
+Check whether a bucket policy enforces VPC endpoint access:
+
+```bash
+aws s3api get-bucket-policy \
+  --bucket <bucket-name> \
+  --output text | jq . | grep -i vpce
+```
+
+No output from the `grep` means there is no VPC endpoint restriction on the bucket policy. That is a finding for any bucket holding customer data.
+
+## Check Versioning
+
+[Versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html) keeps a full history of every object written to a bucket. If a computed dataset is overwritten with bad data, a pipeline bug corrupts an object, or an object is deleted accidentally, versioning makes recovery possible. For a pipeline where data integrity and availability are critical, an unversioned bucket is a risk.
+
+**What to check:**
+* Versioning is `Enabled` on all buckets holding raw and computed datasets
+* MFA Delete is enabled on critical. This requires MFA to permanently delete a version, protecting against both accidents and malicious deletion
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **2.1.2** (Ensure MFA Delete is enabled on S3 buckets).
+
+Write the following to a file and run it to check versioning status across all buckets:
+
+```bash
+#!/usr/bin/env bash
+for bucket in $(aws s3api list-buckets --query 'Buckets[*].Name' --output text); do
+  status=$(aws s3api get-bucket-versioning --bucket "$bucket" \
+    --query '{Versioning:Status,MFADelete:MFADelete}')
+  echo "$bucket: $status"
+done
+```
+
+Any bucket showing `null` for `Versioning` has versioning disabled.
+
+## Check for Tags
+
+Tags on S3 buckets are how you know which team owns a bucket, what data it holds, and how sensitive that data is. `DataClassification` is especially important here. The appropriate access controls, encryption, and retention policy all follow from knowing what classification a bucket carries.
+
+Recommended tags for S3 buckets:
+* `DataClassification` — sensitivity level of the data in the bucket (`confidential`, `internal`, `public`)
+* `Owner` / `Team` — the team responsible for the bucket
+* `CostCenter` — for billing attribution
+* `ManagedBy` — `terraform`, `cloudformation`, `manual`, etc.
+* `ObjectTTL` — expected retention period for objects in the bucket
+
+Check tags on a specific bucket:
+
+```bash
+aws s3api get-bucket-tagging \
+  --bucket <bucket-name>
+```
+
+## Check for Access Logging
+
+[S3 access logging](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html) records every request made to a bucket: who accessed it, what object, and when. This is separate from CloudTrail. For buckets holding customer data, access logs provide an audit trail for data access that is required for SOC2 and ISO 27001. Logs should deliver to a separate dedicated logging bucket, not back into the bucket being audited.
+
+**What to check:**
+* Access logging is enabled on all buckets holding customer data
+* Logs deliver to a separate, dedicated logging bucket
+* The logging bucket itself has logging disabled (to avoid an infinite loop) and is not publicly accessible
+
+Check if access logging is configured on a bucket:
+
+```bash
+aws s3api get-bucket-logging \
+  --bucket <bucket-name>
+```
+
+An empty response means logging is not enabled. That is a finding for any bucket holding customer data.
 
 # IAM
 
@@ -1112,5 +1290,17 @@ RDS should use IAM for permissions instead of relying on the underlying db. for 
 
 [Route 53](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html) is AWS's DNS service.
 
+# KMS
+
 # TODO:
+
+## AWS services this doc docesn't currently cover, but could in the future. 
+
 * Lamnbda
+* SQS
+* SNS
+* Dynamo
+
+## Other TODOs:
+
+* The first version is a single flat file. In the future, maybe break this out into child files and directories.
