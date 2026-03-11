@@ -1128,17 +1128,167 @@ aws s3api get-bucket-logging \
 
 An empty response means logging is not enabled. That is a finding for any bucket holding customer data.
 
-# IAM
+# Identity and Access Management (IAM)
 
-This section holds the plan for auditing IAM and the commands to do so. The point of this section is to ensure that least-privilege is enfored. The use of the AWS builtin Roles or the use of wildcards `*.*` is too permissive.
+This section holds the plan for auditing [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) and the commands to do so. The point of this section is to ensure that least-privilege is enfored. The use of the AWS builtin Roles or the use of wildcards `*.*` is too permissive.
 
-## Inspect the List of Users and Ensure they Belong
+## Audit IAM Users
 
-Ensure the use of AWS-managed Roles and Groups aren't used. Enforce least-privilege where as the builtin roles and groups grant too many permissions.
+Every IAM user in the account should have a known owner and a reason to exist. Users who have left the organization, service accounts no longer in use, and users created for one-off tasks that were never cleaned up are all attack surface. The ideal state for most organizations is to have very few or no IAM users at all. Human access should go through an identity provider via SSO (Okta, EntraID), and workloads should use IAM roles. Tools like [Teleport](https://goteleport.com/) layer on top of an SSO provider to manage and audit privileged infrastructure access with short-lived credentials, but that is out of scope for this document. IAM users with long-lived credentials are the fallback, not the default.
 
-## List Out Groups and Applied Permissions
+**What to check:**
+* Every user has a documented owner and purpose
+* Users with console access also have MFA enabled (covered in the Account section — cross-reference findings here)
+* No user has both console access and active access keys at the same time
+* Users who have not logged in or used their keys in 90 days should be disabled or removed
 
-## List Out Roles and the Trust Policies They Have
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **1.3** (Ensure credentials unused for 90 days or greater are disabled) and **1.12** (Ensure credentials unused for 45 days or greater are disabled).
+
+List all IAM users and when they last used their password:
+
+```bash
+aws iam list-users \
+  --query 'Users[*].{UserName:UserName,Created:CreateDate,PasswordLastUsed:PasswordLastUsed}'
+```
+
+Generate a fresh credential report and retrieve it to see the full picture: console access, access keys, MFA status, and last activity all in one place:
+
+```bash
+aws iam generate-credential-report
+```
+
+```bash
+aws iam get-credential-report \
+  --query 'Content' \
+  --output text | base64 -d
+```
+
+## Check Groups and Attached Policies
+
+Groups are how permissions should be assigned to IAM users. Attach a policy to a group and add users to the group, rather than attaching policies directly to individual users. The audit here has two goals: confirm that groups are being used as intended, and check that none of them carry AWS-managed policies that are too permissive.
+
+`AdministratorAccess` and `PowerUserAccess` are the most common offenders. `AdministratorAccess` grants unrestricted access to every AWS service. `PowerUserAccess` grants full access to all services except IAM and Organizations. Neither should be attached to a group that regular users belong to.
+
+**What to check:**
+* Users are assigned permissions through groups, not through policies attached directly to the user
+* No group has `AdministratorAccess` or `PowerUserAccess` attached
+* Each group's policies reflect the actual job function of its members
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **1.15** (Ensure IAM policies are attached only to groups or roles) and **1.16** (Ensure IAM policies that allow full administrative privileges are not attached).
+
+List all groups in the account:
+
+```bash
+aws iam list-groups \
+  --query 'Groups[*].{GroupName:GroupName,GroupId:GroupId,Created:CreateDate}'
+```
+
+Check what managed policies are attached to a group (substitute `<group-name>` from above):
+
+```bash
+aws iam list-attached-group-policies \
+  --group-name <group-name> \
+  --query 'AttachedPolicies[*].{PolicyName:PolicyName,PolicyArn:PolicyArn}'
+```
+
+Check which users, groups, and roles have `AdministratorAccess` attached. Any result here is a finding worth documenting:
+
+```bash
+aws iam list-entities-for-policy \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess \
+  --query '{Users:PolicyUsers[*].UserName,Groups:PolicyGroups[*].GroupName,Roles:PolicyRoles[*].RoleName}'
+```
+
+## Check Roles and Trust Policies
+
+An IAM role is an identity that can be assumed by a user, a service, or another AWS account. The trust policy controls who is allowed to assume it. Overly broad trust policies are one of the most common and dangerous IAM misconfigurations. A role that any AWS account can assume, or that trusts a wildcard principal, can be assumed by anyone with AWS credentials.
+
+**What to check:**
+* No role has a trust policy with `"Principal": "*"` or `"AWS": "*"` without restrictive conditions
+* Cross-account trust entries reference specific, known account IDs — not wildcards
+* Service roles trust only the specific AWS service that needs them (e.g. `ec2.amazonaws.com`, not `*.amazonaws.com`)
+* Roles that have not been used in 90 days should be reviewed for removal
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — least privilege principles throughout section 1; trust policy review supports **1.16**.
+
+List all roles and their creation date:
+
+```bash
+aws iam list-roles \
+  --query 'Roles[*].{RoleName:RoleName,Created:CreateDate,Description:Description}'
+```
+
+Inspect the trust policy of a specific role (substitute `<role-name>` from above):
+
+```bash
+aws iam get-role \
+  --role-name <role-name> \
+  --query 'Role.AssumeRolePolicyDocument' \
+  --output text | jq .
+```
+
+Write the following to a file and run it to print the trust policy for every role at once. Review the output for any `"Principal": "*"` entries:
+
+```bash
+#!/usr/bin/env bash
+for role in $(aws iam list-roles --query 'Roles[*].RoleName' --output text); do
+  echo "=== $role ==="
+  aws iam get-role \
+    --role-name "$role" \
+    --query 'Role.AssumeRolePolicyDocument' \
+    --output text | jq .
+done
+```
+
+## Check for Wildcard Permissions in Policies
+
+A policy statement with `"Action": "*"` or `"Resource": "*"` grants unrestricted access to either every action in a service or every resource of a type. These are the IAM equivalent of root. They should not appear in any customer-managed policy. AWS-managed policies like `AdministratorAccess` contain wildcards by design, which is exactly why the recommendation is not to use them.
+
+This check scans all customer-managed policies (policies your organization wrote, not AWS-provided ones) for wildcard actions or resources on Allow statements.
+
+**What to check:**
+* No customer-managed policy has `"Action": "*"` in an Allow statement
+* No customer-managed policy has `"Resource": "*"` paired with sensitive actions like `iam:*`, `s3:*`, or `ec2:*`
+* Inline policies attached directly to users, groups, or roles are also checked
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **1.16** (Ensure IAM policies that allow full administrative privileges are not attached) and the least privilege principle throughout section 1.
+
+List all customer-managed policies in the account:
+
+```bash
+aws iam list-policies \
+  --scope Local \
+  --query 'Policies[*].{PolicyName:PolicyName,Arn:Arn,DefaultVersionId:DefaultVersionId}'
+```
+
+Inspect the document for a specific policy (substitute `<policy-arn>` and `<version-id>` from above):
+
+```bash
+aws iam get-policy-version \
+  --policy-arn <policy-arn> \
+  --version-id <version-id> \
+  --query 'PolicyVersion.Document' | jq .
+```
+
+Write the following to a file and run it to scan every customer-managed policy for wildcard Allow statements:
+
+```bash
+#!/usr/bin/env bash
+for policy_arn in $(aws iam list-policies --scope Local --query 'Policies[*].Arn' --output text); do
+  version=$(aws iam get-policy \
+    --policy-arn "$policy_arn" \
+    --query 'Policy.DefaultVersionId' \
+    --output text)
+  doc=$(aws iam get-policy-version \
+    --policy-arn "$policy_arn" \
+    --version-id "$version" \
+    --query 'PolicyVersion.Document')
+  matches=$(echo "$doc" | jq '[.Statement[] | select(.Effect=="Allow") | select(.Action=="*" or (.Action | arrays | any(. == "*")))] | length')
+  if [ "$matches" -gt 0 ]; then
+    echo "WILDCARD ACTION FOUND: $policy_arn"
+  fi
+done
+```
 
 
 # EKS
