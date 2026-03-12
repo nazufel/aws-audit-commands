@@ -402,7 +402,7 @@ GuardDuty is AWS's managed threat detection service. It watches CloudTrail, DNS 
 **What to check:**
 - GuardDuty has a delegated administrator account configured for the organization
 - `AutoEnableOrganizationMembers` is set to `ALL` or `NEW` so new accounts are covered automatically
-- All member accounts show a `Enabled` relationship status — look for any that are `Disabled` or `Resigned`
+- All member accounts show an `Enabled` relationship status. Look for any that show `Disabled` or `Resigned`
 
 > **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **3.9** (Ensure that AWS GuardDuty is enabled).
 
@@ -770,7 +770,7 @@ EC2 instances that need AWS API access should use [IAM instance profiles](https:
 **What to check:**
 * Every instance that makes AWS API calls has an IAM instance profile attached
 * Instances with no profile attached are investigated for hardcoded credentials
-* The permissions on each profile follow least privilege — no `AdministratorAccess` or wildcard policies
+* The permissions on each profile follow least privilege with no `AdministratorAccess` or wildcard policies
 
 > **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **1.18** (Ensure that IAM Access analyzer is enabled for all regions) supports this by flagging overly permissive roles; least privilege is a foundational CIS principle throughout section 1.
 
@@ -883,7 +883,7 @@ aws wafv2 list-resources-for-web-acl \
   --query 'ResourceArns'
 ```
 
-AWS WAF supports [Managed Rule Groups](https://docs.aws.amazon.com/waf/latest/developerguide/waf-managed-rule-groups.html). These are pre-built rule sets that can be added to a Web ACL without writing rules from scratch. AWS publishes a free set called [AWS Managed Rules](https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups.html) that covers common threats like the OWASP Top 10, known bad inputs, and IP reputation lists. Third-party rule groups from vendors like F5 and Fortinet are also available through AWS Marketplace. If a Web ACL has no managed rule groups and no custom rules, that is worth flagging — an empty Web ACL attached to a load balancer provides no protection.
+AWS WAF supports [Managed Rule Groups](https://docs.aws.amazon.com/waf/latest/developerguide/waf-managed-rule-groups.html). These are pre-built rule sets that can be added to a Web ACL without writing rules from scratch. AWS publishes a free set called [AWS Managed Rules](https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups.html) that covers common threats like the OWASP Top 10, known bad inputs, and IP reputation lists. Third-party rule groups from vendors like F5 and Fortinet are also available through AWS Marketplace. If a Web ACL has no managed rule groups and no custom rules, that is worth flagging as a finding. An empty Web ACL provides no protection.
 
 ## Check Load Balancer Configuration
 
@@ -1138,7 +1138,7 @@ Every IAM user in the account should have a known owner and a reason to exist. U
 
 **What to check:**
 * Every user has a documented owner and purpose
-* Users with console access also have MFA enabled (covered in the Account section — cross-reference findings here)
+* Users with console access also have MFA enabled (covered in the Account section; cross-reference findings here)
 * No user has both console access and active access keys at the same time
 * Users who have not logged in or used their keys in 90 days should be disabled or removed
 
@@ -1205,7 +1205,7 @@ An IAM role is an identity that can be assumed by a user, a service, or another 
 
 **What to check:**
 * No role has a trust policy with `"Principal": "*"` or `"AWS": "*"` without restrictive conditions
-* Cross-account trust entries reference specific, known account IDs — not wildcards
+* Cross-account trust entries reference specific, known account IDs and not wildcards
 * Service roles trust only the specific AWS service that needs them (e.g. `ec2.amazonaws.com`, not `*.amazonaws.com`)
 * Roles that have not been used in 90 days should be reviewed for removal
 
@@ -1383,7 +1383,7 @@ Any finding with a status of `ACTIVE` that has not been reviewed is a finding in
 
 # Elastic Kubernetes Service (EKS)
 
-This section holds the plan for auditing an [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster and the commands to do so. The objective is to walk through the main components of a [Kubernetes](https://kubernetes.io/docs/home/) cluster and identify what needs to be secured. Kubernetes has many moving parts — this section focuses on the ones that carry the most security risk.
+This section holds the plan for auditing an [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster and the commands to do so. The objective is to walk through the main components of a [Kubernetes](https://kubernetes.io/docs/home/) cluster and identify what needs to be secured. Kubernetes has many moving parts. This section focuses on the ones that carry the most security risk.
 
 If a resource type referenced below does not seem to exist in the cluster, use the following command to see what resource types the cluster actually has:
 
@@ -1446,6 +1446,8 @@ aws eks update-kubeconfig \
 
 The Kubernetes API server is the control plane endpoint that `kubectl` communicates with. A publicly exposed API server is reachable from the internet and is a target for credential stuffing and API exploits. The recommended configuration is private-only access, where the API server is only reachable from within the VPC. If public access must remain on, it should be restricted to specific CIDR blocks.
 
+> Tools like [Teleport](https://goteleport.com) also can make private endpoints accessable via their proxy, so no need for VPN connections.
+
 **What to check:**
 * `endpointPublicAccess` is `false`, or if `true`, `publicAccessCidrs` does not contain `0.0.0.0/0`
 * `endpointPrivateAccess` is `true`
@@ -1472,7 +1474,7 @@ Cross-reference the subnet IDs against the VPC section findings to confirm they 
 
 ## Check etcd Encryption at Rest
 
-[etcd](https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/) is the key-value store that holds all Kubernetes cluster state, including Secrets. Without envelope encryption configured, Secrets are stored in plaintext in etcd. Anyone who gains access to the etcd data — through a backup, a snapshot, or direct storage access — can read every Secret in the cluster.
+[etcd](https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/) is the key-value store that holds all Kubernetes cluster state, including Secrets. Without envelope encryption configured, Secrets are stored in plaintext in etcd. Anyone who gains access to the etcd data through a backup, a snapshot, or direct storage access can read every Secret in the cluster.
 
 **What to check:**
 * An `encryptionConfig` is defined on the cluster
@@ -1487,14 +1489,67 @@ aws eks describe-cluster \
   --query 'cluster.encryptionConfig'
 ```
 
+## Check Control Plane Logging
+
+EKS can send control plane component logs to CloudWatch. There are five log types: `api` (API server requests), `audit` (every call to the Kubernetes API with the caller identity and outcome), `authenticator` (authentication decisions made by AWS IAM Authenticator), `controllerManager`, and `scheduler`. The `audit` log is the most security-relevant. It is the Kubernetes equivalent of CloudTrail and records who called what API and whether it was allowed or denied. Without it, there is no way to investigate suspicious activity in the cluster after the fact.
+
+**What to check:**
+* The `audit` log type is enabled and sending to CloudWatch
+* Ideally all five log types are enabled for full visibility
+* CloudWatch log groups for the cluster have an appropriate retention period set
+
+Check which log types are currently enabled on the cluster:
+
+```bash
+aws eks describe-cluster \
+  --name <cluster-name> \
+  --query 'cluster.logging.clusterLogging'
+```
+
+The output shows two entries: `types` that are enabled and `types` that are disabled. Any configuration where `audit` appears in the disabled list is a finding.
+
+## Check EKS Add-on Versions
+
+EKS managed add-ons run inside the cluster and handle critical functions: `vpc-cni` manages pod networking, `kube-proxy` handles service routing, `coredns` handles cluster DNS, and `eks-pod-identity-agent` supports Pod Identities. Each add-on has its own release cycle and carries its own CVEs when outdated. AWS publishes the latest supported version for each add-on per Kubernetes minor version.
+
+**What to check:**
+* All installed add-ons are at the latest or near-latest version for the cluster's Kubernetes version
+* No add-on is in a `DEGRADED` or `CREATE_FAILED` state
+* The VPC CNI add-on is installed and managed (not self-managed), so AWS can update it
+
+List all add-ons installed on the cluster:
+
+```bash
+aws eks list-addons \
+  --cluster-name <cluster-name>
+```
+
+Describe a specific add-on to see its current version and status (substitute `<addon-name>` such as `vpc-cni`, `kube-proxy`, `coredns`):
+
+```bash
+aws eks describe-addon \
+  --cluster-name <cluster-name> \
+  --addon-name <addon-name> \
+  --query 'addon.{Name:addonName,Version:addonVersion,Status:status,UpdatedAt:modifiedAt}'
+```
+
+Check what the latest available versions are for a specific add-on and Kubernetes version:
+
+```bash
+aws eks describe-addon-versions \
+  --addon-name vpc-cni \
+  --kubernetes-version <k8s-version> \
+  --query 'addons[*].addonVersions[0].addonVersion'
+```
+
 ## Nodes
 
-Node groups are the EC2 instances that run workloads. The node section focuses on version currency, placement, and what runs on the nodes at the system level.
+Node groups are the EC2 instances that run workloads. The node section focuses on version currency, placement, operating system choice, and the IAM permissions the nodes carry.
 
 **What to check:**
 * All nodes show a `Ready` status with no persistent `NotReady` nodes
 * Node AMI versions are current and not significantly behind the latest release
-* Nodes are spread across multiple availability zones for availability
+* Nodes are spread across at least three availability zones
 * Node groups are in private subnets (see the control plane check above for the subnet cross-reference)
 
 List all nodes and their status, version, and which zone they are in:
@@ -1517,6 +1572,89 @@ for ng in $(aws eks list-nodegroups \
     --nodegroup-name "$ng" \
     --query 'nodegroup.{Subnets:subnets,AmiType:amiType,Version:version}'
 done
+```
+
+### Check Node Groups Span Multiple Availability Zones
+
+A node group confined to a single AZ has no resilience. If that AZ has an outage, every node in the group goes down simultaneously. The recommended pattern is one private subnet per AZ, with three AZs, so the scheduler can distribute pods across zones. Kubernetes does not automatically rebalance pods across AZs. Spreading is done at scheduling time, so nodes must exist in all target AZs before workloads are deployed.
+
+**What to check:**
+* Each node group's subnet list covers at least three different availability zones
+* The subnets are distributed evenly across AZs, not weighted toward one
+
+Write the following to a file and run it to check which AZs each node group's subnets are in:
+
+```bash
+#!/usr/bin/env bash
+for ng in $(aws eks list-nodegroups \
+  --cluster-name <cluster-name> \
+  --query 'nodegroups' --output text); do
+  echo "=== Nodegroup: $ng ==="
+  subnet_ids=$(aws eks describe-nodegroup \
+    --cluster-name <cluster-name> \
+    --nodegroup-name "$ng" \
+    --query 'nodegroup.subnets' --output text)
+  aws ec2 describe-subnets \
+    --subnet-ids $subnet_ids \
+    --query 'Subnets[*].{SubnetId:SubnetId,AZ:AvailabilityZone,Public:MapPublicIpOnLaunch}'
+done
+```
+
+Any node group with subnets in fewer than three AZs, or with `MapPublicIpOnLaunch` set to `true`, is a finding.
+
+### Check the Node IAM Role
+
+Each node group has an IAM role that every node in the group assumes. This role gives the node the permissions it needs to join the cluster, pull container images from ECR, and call AWS APIs for networking. The role needs three specific managed policies and nothing more. Any additional permissions on the node role are permissions that every workload running on that node could potentially access if the pod escapes its container boundary.
+
+The required policies are:
+* `AmazonEKSWorkerNodePolicy` — allows nodes to call EKS APIs to register with the cluster
+* `AmazonEC2ContainerRegistryReadOnly` — allows nodes to pull images from ECR
+* `AmazonEKS_CNI_Policy` — allows the VPC CNI plugin to manage ENIs (this can instead be moved to the VPC CNI service account via IRSA, which is the more locked-down approach)
+
+**What to check:**
+* The node role has exactly the three required policies and nothing additional
+* The node role does not have `AdministratorAccess`, broad S3 permissions, or any IAM permissions
+* The `AmazonEKS_CNI_Policy` has been moved to the VPC CNI service account via IRSA rather than staying on the node role
+
+Get the node role ARN for a node group:
+
+```bash
+aws eks describe-nodegroup \
+  --cluster-name <cluster-name> \
+  --nodegroup-name <nodegroup-name> \
+  --query 'nodegroup.nodeRole'
+```
+
+List the policies attached to the node role (substitute the role name from the ARN above):
+
+```bash
+aws iam list-attached-role-policies \
+  --role-name <node-role-name> \
+  --query 'AttachedPolicies[*].{PolicyName:PolicyName,PolicyArn:PolicyArn}'
+```
+
+### Check Node OS: Bottlerocket vs Amazon Linux
+
+The default AMI type for EKS node groups is Amazon Linux 2 (`AL2_x86_64`). [Bottlerocket](https://aws.amazon.com/bottlerocket/) is an AWS-built, open-source operating system designed specifically for running containers. It has a significantly smaller attack surface than a general-purpose Linux distribution.
+
+Key security properties of Bottlerocket:
+* Immutable root filesystem — the OS cannot be modified at runtime
+* No package manager, no SSH by default — dramatically reduces what an attacker can do with node access
+* Read-only root partition with dm-verity integrity verification
+* Automatic updates applied atomically, with rollback on failure
+* SELinux enforcing by default
+
+**What to check:**
+* Node groups use `BOTTLEROCKET_x86_64` or `BOTTLEROCKET_ARM_64` as the AMI type
+* If Amazon Linux 2 is in use, document the reason and note it as a recommendation to migrate
+
+Check the AMI type for each node group:
+
+```bash
+aws eks describe-nodegroup \
+  --cluster-name <cluster-name> \
+  --nodegroup-name <nodegroup-name> \
+  --query 'nodegroup.{AmiType:amiType,ReleaseVersion:releaseVersion}'
 ```
 
 ## Namespaces
@@ -1624,7 +1762,7 @@ spec:
 **What to check:**
 * `runAsNonRoot` is `true` — the container process should never run as UID 0
 * `runAsUser` is set to a non-zero UID
-* No pod has `hostPID: true`, `hostIPC: true`, or `hostNetwork: true` — these share the node's process, IPC, or network namespaces with the container and are rarely legitimate
+* No pod has `hostPID: true`, `hostIPC: true`, or `hostNetwork: true`. These settings share the node's process, IPC, or network namespaces with the container and are rarely legitimate
 
 ### Container-Level Security Context
 
@@ -1644,7 +1782,7 @@ containers:
 
 **What to check:**
 * `allowPrivilegeEscalation` is `false` on every container
-* `privileged` is `false` — a privileged container has nearly full access to the host
+* `privileged` is `false`. A privileged container has nearly full access to the host
 * `readOnlyRootFilesystem` is `true` where possible
 * `capabilities` drops `ALL` and adds back only what is explicitly required
 
@@ -1665,13 +1803,38 @@ kubectl get pods --all-namespaces -o json | jq -r '
 '
 ```
 
+These configurations can be enforced by Pod Security Admission, described below.
+
 ### Pod Security Admission
 
-[Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/) (PSA) is the Kubernetes-native way to enforce security context standards at the namespace level. Rather than checking each pod manually, PSA applies a policy to the entire namespace that prevents non-compliant pods from being scheduled. There are three built-in policy levels:
+[Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/) (PSA) is the Kubernetes-native way to enforce security context standards at the namespace level. Rather than relying on developers to set the right fields, PSA gives the cluster a way to reject pods that do not meet a minimum security bar before they are ever scheduled.
+
+PSA works by adding labels to a namespace. When a pod is submitted to that namespace, the admission controller checks the pod spec against the policy level defined in the label. If the pod fails the check, the behavior depends on the mode configured:
+
+* `enforce` — the pod is rejected outright and will not be created
+* `audit` — the pod is created but a violation is logged to the audit log. Useful for detecting what would break before switching to enforce
+* `warn` — the pod is created but the API server returns a warning to the caller. Helpful during migrations
+
+Each mode is independent and can be set to a different policy level on the same namespace. A common rollout pattern is to start with `warn` and `audit` at `restricted`, observe what breaks, fix violations, and then move to `enforce`.
+
+The three policy levels are:
 
 * `privileged` — no restrictions, used for system-level namespaces like `kube-system`
 * `baseline` — blocks the most dangerous configurations (privileged containers, hostPID, etc.)
 * `restricted` — the strictest policy, requires most of the security context settings above
+
+An example namespace label that enforces `restricted` and also warns on violations looks like:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: my-app
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+```
 
 Check whether PSA labels are applied to namespaces:
 
@@ -1680,7 +1843,59 @@ kubectl get namespaces \
   -o json | jq -r '.items[] | "\(.metadata.name): \(.metadata.labels | to_entries | map(select(.key | startswith("pod-security"))) | from_entries)"'
 ```
 
-Any namespace running application workloads that shows no `pod-security` labels is operating with no enforcement.
+Any namespace running application workloads that shows no `pod-security` labels is operating with no enforcement. That is worth flagging as a finding.
+
+PSA is built into Kubernetes and requires no additional installs, but it has limits. It can only enforce the fields defined by the [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/). It cannot enforce custom rules like "all images must come from our private registry" or "no pods may use the `latest` tag." For those use cases, a third-party admission controller is the right tool.
+
+### Admission Controllers
+
+An [admission controller](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/) is a piece of code that runs in the Kubernetes API server pipeline after a request is authenticated and authorized, but before the resource is written to etcd. Every `kubectl apply` passes through all registered admission controllers before anything is persisted. There are two types:
+
+* **Validating admission controllers** inspect the request and either allow or deny it. They cannot change the resource.
+* **Mutating admission controllers** can modify the resource before it is persisted. They can inject values, add labels, or set default fields automatically.
+
+PSA is a validating admission controller built into Kubernetes. Beyond PSA, teams commonly deploy external admission controllers using the [Admission Webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/) mechanism, which lets any service in the cluster act as an admission controller.
+
+Common third-party admission controllers to look for:
+
+**[Kyverno](https://kyverno.io/)** is a Kubernetes-native policy engine. Policies are written as Kubernetes YAML resources rather than a separate policy language. Kyverno can validate, mutate, and generate resources. A typical policy would enforce image registry restrictions, require specific labels on all workloads, or auto-inject a security context if one is missing. Check if it is installed:
+
+```bash
+kubectl get pods \
+  -n kyverno
+```
+
+```bash
+kubectl get clusterpolicies
+```
+
+**[OPA Gatekeeper](https://open-policy-agent.github.io/gatekeeper/)** uses [Open Policy Agent](https://www.openpolicyagent.org/) (OPA) as its policy engine. Policies are written in a language called [Rego](https://www.openpolicyagent.org/docs/latest/policy-language/). OPA is more expressive than Kyverno but has a steeper learning curve. It is a good fit for organizations that already use OPA elsewhere (for example, in Terraform or service mesh authorization). Check if it is installed:
+
+```bash
+kubectl get pods \
+  -n gatekeeper-system
+```
+
+```bash
+kubectl get constrainttemplates
+```
+
+**[Istio](https://istio.io/)** is a service mesh that uses a mutating admission controller to inject a sidecar proxy container into every pod at scheduling time. The sidecar handles mTLS between services, traffic routing, and observability without the application needing to be aware of it. Istio is not primarily a security policy tool, but because it is a mutating admission controller it touches every pod in the mesh. Check if the sidecar injector is running:
+
+```bash
+kubectl get pods \
+  -n istio-system
+```
+
+```bash
+kubectl get mutatingwebhookconfigurations
+```
+
+```bash
+kubectl get validatingwebhookconfigurations
+```
+
+Any `MutatingWebhookConfiguration` or `ValidatingWebhookConfiguration` on the cluster represents a service that is intercepting all or some API requests. Review what is registered and whether it is expected. A webhook that is misconfigured or pointing to a service that is down can cause all pod creation in the cluster to fail.
 
 ## Services
 
@@ -1710,24 +1925,69 @@ kubectl get services --all-namespaces -o json | jq -r '
 '
 ```
 
+## CNI
+
+CNI stands for Container Network Interface. It is the plugin responsible for giving every pod an IP address and connecting it to the network. When the kubelet schedules a pod onto a node, it calls the CNI plugin to set up the pod's network interface, assign an IP, and configure the routing rules so that pod can send and receive traffic. Without a CNI, pods have no network.
+
+On EKS, AWS ships its own CNI called the [VPC CNI](https://github.com/aws/amazon-vpc-cni-k8s) (`aws-node`). It assigns each pod a real IP address pulled directly from the VPC subnet. This means pods are first-class citizens on the VPC network, reachable by other AWS services and resources without NAT or an overlay network. It is the default CNI on every EKS cluster.
+
+Other CNIs seen in Kubernetes environments:
+
+* **[Calico](https://www.tigera.io/project-calico/)** — a widely used CNI with strong network policy enforcement. Often installed alongside the VPC CNI on EKS specifically to gain its policy engine
+* **[Cilium](https://cilium.io/)** — uses eBPF in the Linux kernel for high-performance networking. Supports Layer 7 HTTP-aware network policies beyond what standard Kubernetes NetworkPolicy resources can express
+* **[Weave](https://www.weave.works/oss/net/)** — an older overlay-based CNI, less common on EKS today
+
+The CNI has a direct security impact because it is responsible for enforcing network policies. If the CNI does not support network policy enforcement, any NetworkPolicy resources in the cluster are decorative and have no effect on traffic. This is covered in the Network Policies section below.
+
+Check which CNI is running and its version:
+
+```bash
+kubectl get pods \
+  -n kube-system \
+  -o wide
+```
+
+```bash
+kubectl describe daemonset aws-node \
+  -n kube-system | grep -i image
+```
+
+Look for `aws-node` pods for the VPC CNI, `calico-node` for Calico, or `cilium` for Cilium. The version reported by `describe` should be checked against the [EKS add-on release notes](https://docs.aws.amazon.com/eks/latest/userguide/eks-add-ons.html) for known CVEs and whether the version is still supported for the cluster's Kubernetes version.
+
 ## Network Policies
 
-By default, Kubernetes applies no network restrictions between pods. Every pod in the cluster can reach every other pod on any port. [Network Policies](https://kubernetes.io/docs/concepts/services-networking/network-policies/) are the Kubernetes resource that implements microsegmentation — restricting which pods can communicate with which. Without them, a compromised pod can freely scan and connect to any other pod in the cluster, including databases, internal APIs, and the Kubernetes API server.
+Kubernetes applies no network restrictions between pods, by default. Every pod in the cluster can reach every other pod on any port. [Network Policies](https://kubernetes.io/docs/concepts/services-networking/network-policies/) are the Kubernetes resource that implements microsegmentation, restricting which pods can communicate with which. Without them, a compromised pod can freely scan and connect to any other pod in the cluster, including databases, internal APIs, and the Kubernetes API server.
 
-Network policies require a CNI plugin that supports them (such as Calico, Cilium, or Weave). If the cluster's CNI does not support network policies, the resources can be created but they will have no effect.
+Network policies require a CNI that supports enforcement. If the CNI does not, the resources can be created but will have no effect. Creating policies against an unsupporting CNI gives a false sense of security, so confirm the CNI first using the section above.
 
-**What to check:**
-* Network policies exist in every namespace running application workloads
-* A default-deny policy exists in each namespace (deny all ingress and egress by default, then allow only what is needed)
-* No policy uses overly broad selectors like `podSelector: {}` with unrestricted ports on both ingress and egress
-
-List all network policies across all namespaces:
+List all network policies across all namespaces to get a baseline picture:
 
 ```bash
 kubectl get networkpolicies \
   --all-namespaces \
   -o wide
 ```
+
+## Check for a Default-Deny Policy in Every Namespace
+
+The most important network policy pattern is a default-deny. Without it, any pod can reach any other pod even if additional allow policies exist. The allow policies are additive, so the only way to ensure a namespace has a closed posture is to start with a policy that denies everything and then explicitly allow only the traffic that is needed.
+
+A compliant default-deny policy looks like this:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: my-app
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+```
+
+The empty `podSelector: {}` matches every pod in the namespace. Listing both `Ingress` and `Egress` in `policyTypes` with no rules denies all traffic in both directions. A policy that only lists `Ingress` will still allow all egress, which is a partial control.
 
 Write the following to a file and run it to identify namespaces with no network policies defined:
 
@@ -1742,6 +2002,100 @@ for ns in $all_ns; do
 done
 ```
 
+Write the following to a file and run it to check which namespaces have policies but are missing a default-deny that covers both ingress and egress:
+
+```bash
+#!/usr/bin/env bash
+kubectl get networkpolicies --all-namespaces -o json | jq -r '
+  .items |
+  group_by(.metadata.namespace) |
+  .[] |
+  . as $policies |
+  ($policies[0].metadata.namespace) as $ns |
+  if ($policies | map(
+    select(
+      .spec.podSelector == {} and
+      (.spec.policyTypes | (contains(["Ingress"]) and contains(["Egress"]))) and
+      (.spec.ingress == null or .spec.ingress == []) and
+      (.spec.egress == null or .spec.egress == [])
+    )
+  ) | length) == 0
+  then "\($ns): no default-deny-all policy found"
+  else empty
+  end
+'
+```
+
+> **CIS Reference:** CIS Kubernetes Benchmark v1.8 — **5.3.2** (Ensure that all Namespaces have Network Policies defined).
+
+## Check for Overly Permissive Policies
+
+A network policy with an empty `podSelector` and no port or peer restrictions on an allow rule is functionally equivalent to having no policy. This pattern can appear when a developer creates a policy to "fix" a connectivity issue without understanding what it opens up.
+
+Write the following to a file and run it to find policies that allow ingress or egress from all pods with no port restriction:
+
+```bash
+#!/usr/bin/env bash
+kubectl get networkpolicies --all-namespaces -o json | jq -r '
+  .items[] |
+  . as $pol |
+  (.metadata.namespace + "/" + .metadata.name) as $name |
+  (
+    (.spec.ingress // [] | map(select(
+      (.from == null or .from == []) and
+      (.ports == null or .ports == [])
+    )) | length > 0) or
+    (.spec.egress // [] | map(select(
+      (.to == null or .to == []) and
+      (.ports == null or .ports == [])
+    )) | length > 0)
+  ) |
+  if . then "\($name): overly permissive rule detected" else empty end
+'
+```
+
+## Check for Namespace Isolation Between Tenants
+
+If the cluster hosts multiple teams or environments in separate namespaces, network policies should prevent cross-namespace traffic unless explicitly required. A pod in a staging namespace should not be able to reach a pod in the production namespace. Without explicit namespace selectors in allow rules, nothing stops this traffic.
+
+Check whether any policies use `namespaceSelector` to allow cross-namespace traffic:
+
+```bash
+kubectl get networkpolicies \
+  --all-namespaces \
+  -o json | jq -r '
+    .items[] |
+    select(
+      (.spec.ingress // [] | map(select(.from // [] | map(.namespaceSelector) | any)) | length > 0) or
+      (.spec.egress // [] | map(select(.to // [] | map(.namespaceSelector) | any)) | length > 0)
+    ) |
+    "\(.metadata.namespace)/\(.metadata.name): allows cross-namespace traffic"
+  '
+```
+
+Review each result and confirm whether the cross-namespace access is intentional and documented.
+
+## Verify the CNI Supports Network Policies
+
+Creating network policies against a CNI that does not enforce them is a false control. The policies will exist in etcd and look compliant, but no traffic will actually be blocked. Check which CNI is running in the cluster:
+
+```bash
+kubectl get pods \
+  -n kube-system \
+  -o wide
+```
+
+Look for pods with names like `calico`, `cilium`, `weave`, or `aws-node` (the AWS VPC CNI). The AWS VPC CNI that ships with EKS by default does not support network policies on its own. EKS added [network policy support to the VPC CNI](https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html) starting in version 1.14 of the add-on, but it must be explicitly enabled. If the cluster is using the VPC CNI and network policies are defined, confirm the network policy feature is actually enabled:
+
+```bash
+kubectl describe daemonset aws-node \
+  -n kube-system | grep -i "enable-network-policy"
+```
+
+If neither Calico, Cilium, nor an enabled VPC CNI network policy feature is present, all existing network policies are decorative and every namespace is effectively open.
+
+> **CIS Reference:** CIS Kubernetes Benchmark v1.8 — **5.3.1** (Ensure that the CNI in use supports Network Policies) and **5.3.2** (Ensure that all Namespaces have Network Policies defined).
+
 ## Gateway
 
 [Gateway API](https://kubernetes.io/docs/concepts/services-networking/gateway/) is the current standard for routing traffic into and out of the cluster, replacing the older Ingress resource. Gateways use a controller (such as the AWS Load Balancer Controller) to provision and manage external load balancers. The Gateway and its routes define exactly which traffic is allowed in and where it goes.
@@ -1749,7 +2103,7 @@ done
 **What to check:**
 * The Gateway controller is running a supported, up-to-date version
 * No `HTTPRoute` or `GRPCRoute` resources expose internal services that should not be externally reachable
-* All routes require TLS — no unencrypted HTTP routes in production
+* All routes require TLS, meaning no unencrypted HTTP routes in production
 * Unused Gateway resources are removed
 
 List all Gateways and their status:
@@ -1770,7 +2124,7 @@ kubectl get httproutes \
 
 ## ConfigMaps
 
-[ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/) inject configuration into pods as environment variables or files on the container filesystem. The most common finding is secrets stored in ConfigMaps — database passwords, API keys, tokens — because it was convenient and the developer did not want to deal with Kubernetes Secrets. ConfigMaps are not encrypted and anyone with read access to the namespace can read them in plaintext.
+[ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/) inject configuration into pods as environment variables or files on the container filesystem. The most common finding is secrets stored in ConfigMaps (database passwords, API keys, tokens) because it was convenient and the developer did not want to deal with Kubernetes Secrets. ConfigMaps are not encrypted and anyone with read access to the namespace can read them in plaintext.
 
 **What to check:**
 * No ConfigMap contains passwords, tokens, API keys, or any value that should be a Secret
@@ -1817,7 +2171,7 @@ kubectl get configmaps --all-namespaces -o json | \
 **What to check:**
 * etcd encryption is configured for Secrets (covered in the etcd section above)
 * RBAC restricts which service accounts and users can read Secrets
-* An external secrets operator is in use — tools like [External Secrets Operator](https://external-secrets.io/) or [Secrets Store CSI Driver](https://secrets-store-csi-driver.sigs.k8s.io/) pull secrets from AWS Secrets Manager or Parameter Store at runtime, keeping them out of etcd entirely
+* An external secrets operator is in use. Tools like [External Secrets Operator](https://external-secrets.io/) or [Secrets Store CSI Driver](https://secrets-store-csi-driver.sigs.k8s.io/) pull secrets from AWS Secrets Manager or Parameter Store at runtime, keeping them out of etcd entirely
 
 List all Secrets across all namespaces:
 
@@ -1878,13 +2232,20 @@ kubectl get clusterroles \
 
 ### IRSA and EKS Pod Identities
 
-Pods that need AWS API access (reading from S3, calling Bedrock, writing to DynamoDB) need AWS credentials. The wrong answers are hardcoding access keys in the pod spec or relying on the node's IAM role (all pods on the node would share those permissions). The right answer is to give each workload its own IAM role scoped to exactly what it needs. AWS provides two mechanisms to do this.
+Pods that need AWS API access (reading from S3, calling Bedrock, writing to DynamoDB) need AWS credentials. The wrong answers are hardcoding access keys in the pod spec or relying on the node's IAM role (all pods on the node would share those permissions). The right answer is to give each workload its own IAM role scoped to exactly what it needs. AWS provides two mechanisms to do this:
 
-#### IRSA (IAM Roles for Service Accounts)
+* [IAM Roles for Service Accounts (IRSA)](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html)
+* [EKS Pod Identities](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
 
-IRSA uses OIDC federation. The EKS cluster has an OIDC issuer URL. That issuer is registered as a trusted identity provider in IAM. An IAM role is created with a trust policy that allows the OIDC provider to assume it, scoped to a specific Kubernetes service account in a specific namespace. The Kubernetes service account is annotated with the IAM role ARN. When a pod uses that service account, a mutating webhook injects two environment variables into the pod: `AWS_WEB_IDENTITY_TOKEN_FILE` (a short-lived JWT) and `AWS_ROLE_ARN`. The AWS SDK reads these automatically and calls STS `AssumeRoleWithWebIdentity` to retrieve temporary credentials.
+Below the sections will discuss both options and how to identify which are used in the cluster. Either are acceptable or using a third-party identity provider like Teleport. Hard-coded credentials in the environment or secret files are not options and should be flagged as critical findings. 
 
-The trust policy in the IAM role looks like this:
+#### IRSA
+
+IRSA uses [OIDC federation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_oidc.html). The full setup has four parts that must all be in place for it to work:
+
+**1. The OIDC provider is registered in IAM.** The EKS cluster has an OIDC issuer URL. That URL is registered in IAM as a trusted identity provider, which tells AWS "tokens signed by this cluster's control plane are valid credentials."
+
+**2. The IAM role has a trust policy scoped to a specific service account.** The trust policy allows the OIDC provider to assume the role, but only when the token's `sub` claim matches a specific Kubernetes service account in a specific namespace.
 
 ```json
 {
@@ -1903,11 +2264,50 @@ The trust policy in the IAM role looks like this:
 
 The `Condition` clause is the critical scoping mechanism. Without it, any pod in any namespace using any service account in the cluster could assume the role.
 
+**3. The Kubernetes service account is annotated with the IAM role ARN.** This is what links the Kubernetes identity to the IAM role.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: my-service-account
+  namespace: my-namespace
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/my-role
+```
+
+**4. The pod spec references the service account.** This is the final step and the one most commonly missing or misconfigured. The pod must explicitly declare `serviceAccountName` in its spec. If it does not, it gets the `default` service account, which has no role annotation and no AWS permissions.
+
+```yaml
+spec:
+  serviceAccountName: my-service-account
+  containers:
+    - name: my-app
+      image: my-image
+```
+
+When the pod is created, the [EKS Pod Identity Webhook](https://github.com/aws/amazon-eks-pod-identity-webhook) (a mutating admission controller running in the cluster) sees the service account annotation and automatically injects two things into the pod:
+
+* An environment variable `AWS_ROLE_ARN` set to the role ARN from the annotation
+* An environment variable `AWS_WEB_IDENTITY_TOKEN_FILE` pointing to a projected volume mount at `/var/run/secrets/eks.amazonaws.com/serviceaccount/token`
+
+The AWS SDK reads these environment variables automatically. It picks up the token file, calls STS `AssumeRoleWithWebIdentity`, and receives short-lived temporary credentials. None of this requires the developer to write any credential handling code.
+
+To confirm a running pod has had IRSA credentials injected, inspect its environment:
+
+```bash
+kubectl exec -n <namespace> <pod-name> -- env | grep AWS
+```
+
+You should see `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`. If you see `AWS_ACCESS_KEY_ID` instead, that is a different (and worse) credential mechanism and should be flagged.
+
 #### EKS Pod Identities
 
-EKS Pod Identities is the newer mechanism (launched 2023) and is simpler to operate at scale. It requires the `eks-pod-identity-agent` add-on, which runs as a DaemonSet on each node. Instead of annotating service accounts, you create a "Pod Identity Association" in EKS that maps a specific namespace and service account to an IAM role. The role's trust policy only needs to trust `pods.eks.amazonaws.com` — this is set once and works for any cluster, unlike IRSA which requires a per-cluster OIDC provider in the trust policy.
+EKS Pod Identities is the newer mechanism (launched 2023) and is simpler to operate at scale. The full setup has three parts:
 
-The trust policy looks like this:
+**1. The `eks-pod-identity-agent` add-on is installed.** This runs as a [DaemonSet](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/) on every node. It is the agent that intercepts credential requests from pods and fulfills them using the association mapping. Without it, no Pod Identity associations will work.
+
+**2. A Pod Identity Association is created in EKS.** Instead of annotating service accounts, the mapping is stored in EKS directly. An association ties a specific namespace and service account name to an IAM role. The IAM role's trust policy only needs to trust the `pods.eks.amazonaws.com` service principal, and that trust policy works for any cluster without modification.
 
 ```json
 {
@@ -1922,7 +2322,41 @@ The trust policy looks like this:
 }
 ```
 
-**When to use which:** New workloads should use Pod Identities. It is simpler, scales better across multiple clusters, and is AWS's recommended path going forward. Existing IRSA setups do not need to be migrated immediately, but note them and recommend eventual migration.
+**3. The pod spec references the service account.** Just like IRSA, the pod must declare `serviceAccountName` in its spec to pick up the association. The service account itself does not need any annotation for Pod Identities; the mapping lives entirely in EKS.
+
+```yaml
+spec:
+  serviceAccountName: my-service-account
+  containers:
+    - name: my-app
+      image: my-image
+```
+
+When the pod starts on a node, the `eks-pod-identity-agent` intercepts any AWS SDK credential request destined for the local credential endpoint (`169.254.170.23`). It looks up whether there is a Pod Identity Association for the pod's namespace and service account, assumes the mapped role via STS, and returns short-lived credentials to the SDK. The developer does not need to do anything else. No webhook injects environment variables; the agent handles everything at the network level on the node.
+
+To confirm a running pod is receiving credentials through the Pod Identity agent, check whether the agent is healthy and then inspect the pod's service account:
+
+```bash
+kubectl get daemonset eks-pod-identity-agent \
+  -n kube-system
+```
+
+```bash
+kubectl get pod <pod-name> \
+  -n <namespace> \
+  -o jsonpath='{.spec.serviceAccountName}'
+```
+
+Then verify that service account has a Pod Identity Association:
+
+```bash
+aws eks list-pod-identity-associations \
+  --cluster-name <cluster-name> \
+  --namespace <namespace> \
+  --service-account <service-account-name>
+```
+
+**When to use which:** New workloads should use Pod Identities. It is simpler, does not require per-cluster OIDC provider setup, scales better across multiple clusters, and is AWS's recommended path going forward. Existing IRSA setups do not need to be migrated immediately, but note them and recommend eventual migration.
 
 #### How to Detect Which Is in Use
 
@@ -1990,6 +2424,124 @@ aws iam get-role \
 
 If the trust policy has no `Condition` block, or the `sub` condition uses a wildcard, any pod in the cluster can assume that role. That is a critical finding.
 
+### What to Look for When Neither IRSA nor Pod Identities Are in Use
+
+If the audit finds no IRSA configuration and no Pod Identity associations, workloads are still making AWS API calls somehow. The AWS SDK works through a fixed credential resolution chain in order until it finds something that works:
+
+1. Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`)
+2. Shared credentials file (`~/.aws/credentials`) on the container filesystem
+3. Web identity token file (IRSA)
+4. EKS Pod Identity agent
+5. Instance metadata service (IMDS) — the node's IAM role
+
+If neither IRSA nor Pod Identities are configured, the SDK falls all the way to step 5 and uses the node's IAM role. This means every pod on that node implicitly inherits the node's AWS permissions with no annotation, no configuration, and nothing visible in the pod spec. This is the most dangerous case because it is invisible. No credentials appear anywhere in the cluster, but every pod has AWS access through the node role.
+
+The following checks cover all the ways a workload might be authenticating with AWS improperly.
+
+#### Check for Hardcoded Credentials in Pod Environment Variables
+
+The most obvious misconfiguration is a pod spec with `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` set directly as plaintext environment variables. These are visible to anyone who can read the pod spec and are stored unencrypted in etcd.
+
+Write the following to a file and run it to scan all pods for AWS credential environment variables set directly in the spec:
+
+```bash
+#!/usr/bin/env bash
+kubectl get pods --all-namespaces -o json | jq -r '
+  .items[] |
+  .metadata.namespace as $ns |
+  .metadata.name as $pod |
+  .spec.containers[].env[]? |
+  select(.name | test("AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN")) |
+  select(.value != null) |
+  "\($ns)/\($pod): PLAINTEXT CREDENTIAL in env var: \(.name)"
+'
+```
+
+Any output from this script is a critical finding.
+
+#### Check for AWS Credentials Injected from Kubernetes Secrets
+
+A slightly less obvious pattern is using a Kubernetes Secret to hold the access key and secret, then injecting the Secret values as environment variables via `valueFrom.secretKeyRef`. The credentials are not visible in plaintext in the pod spec, but they are still long-lived static keys that can be extracted by anyone who can read the Secret.
+
+Write the following to a file and run it to find pods pulling environment variables from Secrets where the key name suggests AWS credentials:
+
+```bash
+#!/usr/bin/env bash
+kubectl get pods --all-namespaces -o json | jq -r '
+  .items[] |
+  .metadata.namespace as $ns |
+  .metadata.name as $pod |
+  .spec.containers[].env[]? |
+  select(.valueFrom.secretKeyRef != null) |
+  select(.name | test("AWS_ACCESS_KEY|AWS_SECRET|AWS_SESSION"; "i")) |
+  "\($ns)/\($pod): credential from Secret \(.valueFrom.secretKeyRef.name) key \(.valueFrom.secretKeyRef.key)"
+'
+```
+
+#### Check Secrets for AWS Credential Content
+
+Search the Secrets themselves for values that look like AWS access keys. AWS access key IDs always start with `AKIA` (long-term) or `ASIA` (temporary/STS). Finding one in a Secret means a long-lived credential is stored in etcd.
+
+Write the following to a file and run it to scan Secret data for AWS access key patterns:
+
+```bash
+#!/usr/bin/env bash
+kubectl get secrets --all-namespaces -o json | jq -r '
+  .items[] |
+  .metadata.namespace as $ns |
+  .metadata.name as $name |
+  (.data // {}) | to_entries[] |
+  select(.value != null) |
+  .value |= (. | @base64d) |
+  select(.value | test("AKIA|ASIA")) |
+  "\($ns)/\($name): possible AWS access key in key \(.key)"
+'
+```
+
+Note that Secret values are base64-encoded in the API response, which is why the script decodes them before checking. This is the same reason `base64 -d` was used in the credential report commands in the Account section.
+
+#### Check for AWS Credential Files Mounted as Volumes
+
+Some workloads mount an AWS credentials file directly into the container from a Secret or ConfigMap volume. The file is typically placed at `/root/.aws/credentials` or `/home/<user>/.aws/credentials` inside the container. Check for Secret or ConfigMap volumes with names that suggest AWS configuration.
+
+Write the following to a file and run it to find pods with volumes referencing Secrets or ConfigMaps with AWS-related names:
+
+```bash
+#!/usr/bin/env bash
+kubectl get pods --all-namespaces -o json | jq -r '
+  .items[] |
+  .metadata.namespace as $ns |
+  .metadata.name as $pod |
+  .spec.volumes[]? |
+  select(
+    (.secret.secretName | strings | test("aws|credential"; "i")) or
+    (.configMap.name | strings | test("aws|credential"; "i"))
+  ) |
+  "\($ns)/\($pod): volume \(.name) references \(.secret.secretName // .configMap.name)"
+'
+```
+
+#### Check for the Node Role Fallback
+
+If none of the above checks produce findings but the cluster is still making AWS API calls, the workloads are using the node's IAM role through IMDS. This is the silent misconfiguration. Every pod on the node has the node's permissions. There is no annotation, no secret, and nothing visible in the pod spec.
+
+Confirm the node role and its permissions using the commands in the Node IAM Role section above. Also check whether IMDSv2 is required (covered in the EC2 section). If IMDSv1 is still allowed, pods can reach IMDS without the token hop-limit restriction, making credential theft easier.
+
+Check whether any service accounts in application namespaces have no IRSA annotation and no Pod Identity association, meaning they fall through to the node role:
+
+```bash
+kubectl get serviceaccounts \
+  --all-namespaces \
+  -o json | jq -r '
+    .items[] |
+    select(.metadata.namespace | test("kube-system|kube-public|kube-node-lease") | not) |
+    select(.metadata.annotations."eks.amazonaws.com/role-arn" == null) |
+    "\(.metadata.namespace)/\(.metadata.name): no IRSA annotation"
+  '
+```
+
+Cross-reference this list against the Pod Identity associations retrieved earlier. Any service account that appears here and has no Pod Identity association is using the node role for AWS access.
+
 ## CRDs
 
 [Custom Resource Definitions](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/) extend the Kubernetes API with custom resource types. Most cluster add-ons (cert-manager, the AWS Load Balancer Controller, External Secrets Operator) install CRDs. The security concern is CRDs from unknown or unmanaged sources, and CRDs whose controllers have not been updated.
@@ -2007,23 +2559,332 @@ kubectl get crds \
 
 # Relational Database Service (RDS)
 
-[RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html) runs managed relational databases. 
+[RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html) runs managed relational databases as a fully managed service. The underlying EC2 instances, patching, and backups are handled by AWS. The audit focuses on what the customer controls: network exposure, encryption, access control, and backup configuration.
 
-RDS should use IAM for permissions instead of relying on the underlying db. for example, the postgres user should have a role grant of `rds_iam` to tell it to accept an iam token instead of a username and password.
+Start by listing all RDS instances in the account:
 
-## Public Exposure
+```bash
+aws rds describe-db-instances \
+  --query 'DBInstances[*].{Identifier:DBInstanceIdentifier,Engine:Engine,Version:EngineVersion,Status:DBInstanceStatus,PubliclyAccessible:PubliclyAccessible,StorageEncrypted:StorageEncrypted,MultiAZ:MultiAZ}'
+```
+
+## Check Public Accessibility
+
+An RDS instance with `PubliclyAccessible` set to `true` has a DNS endpoint that resolves to a public IP address. Even if a security group restricts inbound access, a publicly accessible database is a higher-risk configuration and requires justification. Most RDS instances should be in private subnets with no public endpoint.
+
+**What to check:**
+* `PubliclyAccessible` is `false` on every instance
+* Instances are in private subnets, not public ones
+* Security groups allow inbound on the database port only from specific sources (application security groups or VPC CIDR blocks), not from `0.0.0.0/0`
+
+List all publicly accessible instances:
+
+```bash
+aws rds describe-db-instances \
+  --query 'DBInstances[?PubliclyAccessible==`true`].{Identifier:DBInstanceIdentifier,Engine:Engine,Endpoint:Endpoint.Address}'
+```
+
+Check the security groups attached to a specific instance to see what can reach it (substitute `<db-identifier>`):
+
+```bash
+aws rds describe-db-instances \
+  --db-instance-identifier <db-identifier> \
+  --query 'DBInstances[*].VpcSecurityGroups[*].VpcSecurityGroupId'
+```
+
+Then use the VPC section commands to inspect the rules on each of those security group IDs.
+
+## Check Encryption at Rest
+
+RDS storage encryption uses KMS to encrypt the underlying EBS volumes, automated backups, read replicas, and snapshots. Encryption must be enabled at creation time and cannot be added to an existing unencrypted instance without creating a new encrypted snapshot and restoring from it.
+
+**What to check:**
+* `StorageEncrypted` is `true` on every instance
+* The KMS key in use is a customer-managed key, not the AWS-managed `aws/rds` default key
+* Automated snapshots are also encrypted (they inherit the instance's encryption setting)
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **2.3.1** (Ensure that encryption-at-rest is enabled for RDS Instances).
+
+List all unencrypted instances:
+
+```bash
+aws rds describe-db-instances \
+  --query 'DBInstances[?StorageEncrypted==`false`].{Identifier:DBInstanceIdentifier,Engine:Engine}'
+```
+
+Check which KMS key an encrypted instance uses:
+
+```bash
+aws rds describe-db-instances \
+  --db-instance-identifier <db-identifier> \
+  --query 'DBInstances[*].{KmsKeyId:KmsKeyId,StorageEncrypted:StorageEncrypted}'
+```
+
+## Check IAM Database Authentication
+
+RDS instances, by default, use the underlying database's authentication mechanism which is usually username and password. These are long-lived credentials stored in a config file, a Kubernetes Secret, or an environment variable, and they must be rotated manually. IAM database authentication replaces the password with a short-lived token generated by the AWS SDK using the caller's IAM identity. No password is stored, the token expires in 15 minutes, and access is controlled through IAM policies.
+
+For PostgreSQL, the database user must be granted the `rds_iam` role. For MySQL, the user is created with `IDENTIFIED WITH AWSAuthenticationPlugin`.
+
+**What to check:**
+* `IAMDatabaseAuthenticationEnabled` is `true` on every instance
+* Applications are configured to use IAM tokens, not static passwords
+* The IAM role used to generate tokens follows least privilege (scoped to `rds-db:connect` on specific databases and users)
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **2.3.2** (Ensure that IAM Authentication is enabled for RDS Instances).
+
+List all instances where IAM authentication is disabled:
+
+```bash
+aws rds describe-db-instances \
+  --query 'DBInstances[?IAMDatabaseAuthenticationEnabled==`false`].{Identifier:DBInstanceIdentifier,Engine:Engine}'
+```
+
+## Check Automated Backups and Multi-AZ
+
+Automated backups and Multi-AZ are availability and recovery controls. Automated backups enable point-in-time recovery. Multi-AZ maintains a synchronous standby replica in a separate availability zone and promotes it automatically if the primary fails. Both are required for any production database.
+
+**What to check:**
+* `BackupRetentionPeriod` is at least 7 days for production instances
+* `MultiAZ` is `true` for production instances
+* The backup window and maintenance window are set to off-peak hours
+
+List instances with short or no backup retention:
+
+```bash
+aws rds describe-db-instances \
+  --query 'DBInstances[?BackupRetentionPeriod < `7`].{Identifier:DBInstanceIdentifier,BackupRetentionPeriod:BackupRetentionPeriod,MultiAZ:MultiAZ}'
+```
 
 # Bedrock
 
-[Bedrock](https://aws.amazon.com/bedrock/) is for building and hosting AI models.
+[Bedrock](https://aws.amazon.com/bedrock/) is AWS's managed service for building and hosting generative AI applications using foundation models. The security concerns here are different from a traditional service. Bedrock can be used to process customer data, generate content on behalf of users, and in some configurations be fine-tuned on proprietary datasets. Each of these introduces data confidentiality and access control risks specific to AI workloads.
+
+## Check IAM Permissions for Model Invocation
+
+`bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` are the permissions that allow a principal to call a foundation model. These should be scoped to specific model ARNs and granted only to the identities that need them. A policy granting `bedrock:*` to a broad principal gives that identity the ability to invoke any model, list models, and manage Bedrock resources.
+
+**What to check:**
+* No IAM policy grants `bedrock:*` as a wildcard action
+* `bedrock:InvokeModel` is scoped to specific model ARNs in the `Resource` field, not `*`
+* The EKS pod roles or EC2 instance profiles that call Bedrock have the minimum necessary permissions
+
+List all foundation models currently available in the account (this shows what models have been enabled for use):
+
+```bash
+aws bedrock list-foundation-models \
+  --query 'modelSummaries[*].{ModelId:modelId,Provider:providerName,Status:modelLifecycle.status}'
+```
+
+Check which models have been granted access in the account:
+
+```bash
+aws bedrock list-foundation-model-agreements \
+  --query 'modelSummaries[*].{ModelId:modelId,AgreementStatus:agreementStatus}'
+```
+
+## Check Model Invocation Logging
+
+Invocation logging records every request sent to a Bedrock model, including the prompt and the response. Without it, there is no audit trail of what data was sent to a model or what was generated. This is a compliance requirement for SOC2 and ISO 27001 when Bedrock is processing customer data.
+
+**What to check:**
+* Invocation logging is enabled
+* Logs are delivered to a CloudWatch log group or S3 bucket
+* The log destination is in the central logging account, same as CloudTrail logs
+
+Check the current invocation logging configuration. An empty or disabled result is a finding:
+
+```bash
+aws bedrock get-model-invocation-logging-configuration
+```
+
+## Check VPC Endpoint for Bedrock
+
+Bedrock API calls travel over the public internet by default, even though the workload making the call is inside a VPC. A VPC endpoint for Bedrock keeps that traffic within the AWS network. This is the same principle as the S3 VPC endpoint which is more secure and has lower latency.
+
+**What to check:**
+* A VPC endpoint exists for `com.amazonaws.<region>.bedrock-runtime`
+* EKS pods and EC2 instances calling Bedrock are in subnets that route through the endpoint
+
+Check for Bedrock VPC endpoints:
+
+```bash
+aws ec2 describe-vpc-endpoints \
+  --filters Name=service-name,Values=com.amazonaws.us-east-1.bedrock-runtime \
+  --query 'VpcEndpoints[*].{EndpointId:VpcEndpointId,VpcId:VpcId,State:State}'
+```
 
 # Route 53
 
-[Route 53](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html) is AWS's DNS service.
+[Route 53](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html) is AWS's DNS service. It handles domain registration, public DNS resolution, and private DNS within VPCs. Security issues in DNS are high impact because DNS is foundational. A misconfigured or compromised DNS record can redirect traffic, break authentication, or expose internal infrastructure.
+
+## Check Domain Transfer Lock
+
+Route 53 registered domains can have a transfer lock enabled that prevents unauthorized domain transfers to another registrar. An unlocked domain can be transferred away from the account without additional verification. Every registered domain should have transfer lock on.
+
+**What to check:**
+* Every registered domain has `TransferLock` enabled
+* Contact information for each domain is accurate and up to date
+
+List all registered domains and their transfer lock status:
+
+```bash
+aws route53domains list-domains \
+  --query 'Domains[*].{DomainName:DomainName,TransferLock:TransferLock,AutoRenew:AutoRenew}'
+```
+
+Get full details on a specific domain including contacts and lock status (substitute `<domain-name>`):
+
+```bash
+aws route53domains get-domain-detail \
+  --domain-name <domain-name> \
+  --query '{TransferLock:StatusList,AdminContact:AdminContact.Email,Tech:TechContact.Email}'
+```
+
+## Check DNSSEC
+
+[DNSSEC](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-configuring-dnssec.html) cryptographically signs DNS records so that resolvers can verify the response has not been tampered with. Without DNSSEC, an attacker in a position to intercept DNS responses can substitute malicious records. Route 53 supports DNSSEC signing for public hosted zones.
+
+**What to check:**
+* DNSSEC signing is enabled on public hosted zones for production domains
+* The key-signing key (KSK) is in an `ACTIVE` state
+* The DS record has been registered with the parent zone (without this, DNSSEC validation does not chain up to the root)
+
+List all hosted zones and check which have DNSSEC enabled:
+
+```bash
+aws route53 list-hosted-zones \
+  --query 'HostedZones[*].{Name:Name,Id:Id,Private:Config.PrivateZone}'
+```
+
+Check DNSSEC status for a specific hosted zone (substitute `<zone-id>`):
+
+```bash
+aws route53 get-dnssec \
+  --hosted-zone-id <zone-id> \
+  --query '{Status:Status,KeySigningKeys:KeySigningKeys[*].{Name:Name,Status:Status}}'
+```
+
+## Check DNS Query Logging
+
+Route 53 query logging records every DNS query that reaches a public hosted zone. These logs are valuable for security monitoring. DNS is a common channel for command-and-control communication and data exfiltration, and query logs can surface that activity. For private hosted zones inside VPCs, query logging goes through Route 53 Resolver logging.
+
+**What to check:**
+* Query logging is enabled on all public hosted zones
+* Logs are delivered to a CloudWatch log group in the central logging account
+* Resolver query logging is enabled for VPCs using private hosted zones
+
+Check which hosted zones have query logging configured:
+
+```bash
+aws route53 list-query-logging-configs \
+  --query 'QueryLoggingConfigs[*].{Id:Id,HostedZoneId:HostedZoneId,Destination:CloudWatchLogsLogGroupArn}'
+```
+
+Check which VPCs have Resolver query logging enabled:
+
+```bash
+aws route53resolver list-resolver-query-log-config-associations \
+  --query 'ResolverQueryLogConfigAssociations[*].{VpcId:ResourceId,Status:Status,ConfigId:ResolverQueryLogConfigId}'
+```
 
 # Key Management Service (KMS)
 
-[KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) is for creating, hosting, and using keys for encryption.
+[KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) manages encryption keys used across AWS services. Most of the encryption checked in earlier sections such as: EBS volumes, S3 objects, RDS storage, etcd Secrets. These services ultimately depends on a KMS key. KMS is therefore a dependency for the security of the entire environment. A misconfigured key policy or a key with rotation disabled affects everything encrypted with it.
+
+Start by listing all customer-managed keys in the account. AWS-managed keys (prefixed with `aws/`) are managed by AWS and do not appear in this list:
+
+```bash
+aws kms list-keys \
+  --query 'Keys[*].KeyId'
+```
+
+## Check Key Rotation
+
+AWS KMS supports automatic annual rotation for symmetric customer-managed keys. Rotation generates new key material while the old material is retained to decrypt data encrypted with it. Without rotation, a key that has been in use for years represents a larger blast radius if the key material is ever compromised.
+
+**What to check:**
+* Automatic key rotation is enabled on all customer-managed symmetric keys
+* Keys used for high-sensitivity data (S3 customer datasets, RDS, EBS, etcd) are on the rotation list
+
+> **CIS Reference:** CIS AWS Foundations Benchmark v3.0.0 — **3.8** (Ensure rotation for customer-created symmetric CMKs is enabled).
+
+Write the following to a file and run it to check rotation status across all customer-managed keys:
+
+```bash
+#!/usr/bin/env bash
+for key_id in $(aws kms list-keys --query 'Keys[*].KeyId' --output text); do
+  status=$(aws kms get-key-rotation-status \
+    --key-id "$key_id" \
+    --query 'KeyRotationEnabled' \
+    --output text 2>/dev/null)
+  meta=$(aws kms describe-key \
+    --key-id "$key_id" \
+    --query 'KeyMetadata.{Alias:AliasArn,Manager:KeyManager,State:KeyState}' 2>/dev/null)
+  if [ "$status" = "False" ]; then
+    echo "ROTATION DISABLED: $key_id"
+    echo "$meta"
+  fi
+done
+```
+
+## Check Key Policies
+
+Every KMS key has a [key policy](https://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html) that controls who can use and administer it. Key policies are separate from IAM policies, even if an IAM policy grants `kms:*`, the key policy must also allow access. A key policy with `"Principal": "*"` makes the key usable by anyone, which is a critical finding.
+
+**What to check:**
+* No key policy has `"Principal": "*"` without restrictive conditions
+* Cross-account access in key policies is intentional and scoped to specific account IDs and roles
+* Key administrators (who can manage the key) and key users (who can encrypt/decrypt with it) are separate identities
+* No IAM user or role has `kms:*` on a key that encrypts production data
+
+Retrieve the key policy for a specific key (substitute `<key-id>`):
+
+```bash
+aws kms get-key-policy \
+  --key-id <key-id> \
+  --policy-name default \
+  --output text | jq .
+```
+
+Write the following to a file and run it to scan all key policies for wildcard principals:
+
+```bash
+#!/usr/bin/env bash
+for key_id in $(aws kms list-keys --query 'Keys[*].KeyId' --output text); do
+  policy=$(aws kms get-key-policy \
+    --key-id "$key_id" \
+    --policy-name default \
+    --output text 2>/dev/null)
+  if echo "$policy" | jq -e '.Statement[] | select(.Principal == "*" or .Principal.AWS == "*")' > /dev/null 2>&1; then
+    echo "WILDCARD PRINCIPAL IN KEY POLICY: $key_id"
+  fi
+done
+```
+
+## Check Key Aliases and Inventory
+
+Key aliases give KMS keys human-readable names and make it easier to understand what each key is used for. A key with no alias and no description is difficult to attribute to a service or team. During an audit, every key should have a known purpose.
+
+**What to check:**
+* Every key has an alias that reflects its purpose (e.g. `alias/prod-s3-customer-data`, `alias/prod-rds`)
+* Keys that are in a `PendingDeletion` state are reviewed before deletion (data encrypted with them may still need to be decrypted)
+* No keys exist with no alias, no description, and no recent use
+
+List all key aliases:
+
+```bash
+aws kms list-aliases \
+  --query 'Aliases[*].{AliasName:AliasName,KeyId:TargetKeyId}'
+```
+
+Describe a key to see its full metadata including state, creation date, and key usage:
+
+```bash
+aws kms describe-key \
+  --key-id <key-id> \
+  --query 'KeyMetadata.{KeyId:KeyId,State:KeyState,Created:CreationDate,Description:Description,Usage:KeyUsage,Manager:KeyManager}'
+```
 
 # TODO:
 
